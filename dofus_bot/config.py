@@ -36,7 +36,7 @@ class DofusConfig:
         proxy_host = os.environ.get("DOFUS_PROXY_HOST", "127.0.0.1").strip()
         proxy_port = int(os.environ.get("DOFUS_PROXY_PORT", "5555"))
         upstream_host = os.environ.get(
-            "DOFUS_UPSTREAM_HOST", "play-hystoria.net"
+            "DOFUS_UPSTREAM_HOST", "162.19.127.155"
         ).strip()
         upstream_port = int(os.environ.get("DOFUS_UPSTREAM_PORT", "5555"))
         script = os.environ.get("DOFUS_SCRIPT", "").strip() or None

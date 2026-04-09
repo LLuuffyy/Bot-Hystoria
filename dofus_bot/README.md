@@ -51,22 +51,31 @@ interesse est :
 ```
 DOFUS_PROXY_HOST=127.0.0.1
 DOFUS_PROXY_PORT=5555
-DOFUS_UPSTREAM_HOST=play-hystoria.net
+DOFUS_UPSTREAM_HOST=162.19.127.155
 DOFUS_UPSTREAM_PORT=5555
 ```
 
 Par defaut le proxy ecoute sur `127.0.0.1:5555` et forwarde vers
-`play-hystoria.net:5555`. **Ce port est peut-etre faux pour Hystoria.**
-Tu peux le verifier avec cette commande dans un terminal pendant que
-ton client Dofus est connecte :
+**`162.19.127.155:5555`** (serveur de jeu Hystoria V5, identifie via
+`netstat` pendant qu'un vrai client Hystoria etait connecte).
+
+Si l'IP change un jour (maintenance, nouveau serveur...), retrouve-la
+en lancant le client Hystoria jusqu'a l'ecran de selection de perso
+puis en tapant dans `cmd` :
 
 ```
-netstat -n | findstr ESTABLISHED
+netstat -n | findstr :5555
 ```
 
-Cherche une ligne avec l'IP de `play-hystoria.net` (fais un ping pour
-l'obtenir) et note le port. Mets-le dans `DOFUS_UPSTREAM_PORT` ET
-dans `DOFUS_PROXY_PORT` (meme port des deux cotes).
+La ligne affichee est du style :
+
+```
+TCP    192.168.1.16:61008    162.19.127.155:5555    ESTABLISHED
+```
+
+→ la partie droite (`162.19.127.155:5555`) est le serveur reel.
+Mets l'IP dans `DOFUS_UPSTREAM_HOST` et le port dans
+`DOFUS_UPSTREAM_PORT`.
 
 ### 3. Redirection du client Dofus vers le proxy
 
