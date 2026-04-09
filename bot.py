@@ -2,7 +2,8 @@ import asyncio
 import logging
 from pathlib import Path
 
-from playwright.async_api import async_playwright, Browser, BrowserContext, Page
+from playwright.async_api import async_playwright, BrowserContext, Page
+from playwright_stealth import Stealth
 
 from config import Config, load_config
 from logger_setup import setup_logging
@@ -15,24 +16,12 @@ logger = logging.getLogger(__name__)
 MAX_CONSECUTIVE_FAILURES = 5
 FAILURE_COOLDOWN_SECONDS = 1800  # 30 minutes
 
-
-async def create_context(browser: Browser, config: Config) -> BrowserContext:
-    """Create a browser context, restoring cookies if available."""
-    kwargs = {
-        "viewport": {"width": 1280, "height": 720},
-        "user_agent": None,  # Use Playwright's default (real Chrome UA)
-    }
-
-    if config.cookies_path.exists():
-        logger.info("Restoring session from %s", config.cookies_path)
-        kwargs["storage_state"] = str(config.cookies_path)
-
-    return await browser.new_context(**kwargs)
+# Path to store persistent browser profile (survives restarts)
+BROWSER_DATA_DIR = Path("state/browser_profile")
 
 
 async def ensure_logged_in(page: Page, context: BrowserContext, config: Config) -> bool:
     """Make sure we're logged in, attempt login if not."""
-    # Navigate to a page to check login status
     try:
         await page.goto(config.base_url, wait_until="networkidle", timeout=60000)
         await wait_for_cloudflare(page)
@@ -43,7 +32,6 @@ async def ensure_logged_in(page: Page, context: BrowserContext, config: Config) 
     except Exception as e:
         logger.warning("Error checking login status: %s", e)
 
-    # Need to log in
     logger.info("Session expired or not logged in. Attempting login...")
     return await login(page, context, config)
 
@@ -61,18 +49,33 @@ async def main() -> None:
     # Ensure runtime directories exist
     Path("state").mkdir(exist_ok=True)
     Path("logs").mkdir(exist_ok=True)
+    BROWSER_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     consecutive_failures = 0
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(
+        # Use a persistent browser context with the real Chrome browser
+        # This looks like a real user's Chrome, not an automated browser
+        context = await pw.chromium.launch_persistent_context(
+            user_data_dir=str(BROWSER_DATA_DIR),
+            channel="chrome",  # Use the real Chrome installed on the PC
             headless=config.headless,
-            slow_mo=100,  # Slightly slower to appear more human-like
+            slow_mo=100,
+            viewport={"width": 1280, "height": 720},
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ],
         )
-        context = await create_context(browser, config)
-        page = await context.new_page()
 
-        logger.info("Browser launched. Starting vote loop...")
+        # Apply stealth patches to hide automation indicators
+        stealth = Stealth()
+        await stealth.apply_stealth_async(context)
+
+        page = context.pages[0] if context.pages else await context.new_page()
+
+        logger.info("Chrome launched. Starting vote loop...")
 
         while True:
             try:
@@ -131,11 +134,6 @@ async def main() -> None:
 
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                     await _handle_max_failures(consecutive_failures)
-                    # Reset browser context after long failure pause
-                    await page.close()
-                    await context.close()
-                    context = await create_context(browser, config)
-                    page = await context.new_page()
                     consecutive_failures = 0
 
             except KeyboardInterrupt:
@@ -145,26 +143,11 @@ async def main() -> None:
             except Exception as e:
                 consecutive_failures += 1
                 logger.exception("Unexpected error: %s", e)
-
-                # Try to recover by recreating page/context
-                try:
-                    await page.close()
-                except Exception:
-                    pass
-                try:
-                    await context.close()
-                except Exception:
-                    pass
-
-                context = await create_context(browser, config)
-                page = await context.new_page()
-                logger.info("Browser context recreated. Retrying in 2 minutes...")
+                logger.info("Retrying in 2 minutes...")
                 await asyncio.sleep(120)
 
         # Cleanup
-        await page.close()
         await context.close()
-        await browser.close()
         logger.info("Bot shutdown complete.")
 
 

@@ -7,15 +7,42 @@ from config import Config
 logger = logging.getLogger(__name__)
 
 
-async def wait_for_cloudflare(page: Page, timeout: int = 30000) -> None:
-    """Wait for Cloudflare challenge to complete if present."""
+async def wait_for_cloudflare(page: Page, timeout: int = 45000) -> None:
+    """Wait for Cloudflare challenge to complete, clicking Turnstile if needed."""
     try:
+        # Check if we're on a Cloudflare challenge page
+        if "challenge" in page.url or "cdn-cgi" in page.url:
+            logger.info("Cloudflare challenge detected, waiting...")
+
+        # Try to click the Turnstile checkbox if present
+        for _ in range(3):
+            try:
+                # Turnstile checkbox is inside an iframe
+                cf_iframe = page.frame_locator("iframe[src*='challenges.cloudflare.com']")
+                checkbox = cf_iframe.locator("input[type='checkbox']").or_(
+                    cf_iframe.locator(".cb-lb")
+                ).or_(
+                    cf_iframe.locator("#challenge-stage")
+                )
+                if await checkbox.first.is_visible(timeout=3000):
+                    logger.info("Clicking Cloudflare Turnstile checkbox...")
+                    await checkbox.first.click()
+                    await page.wait_for_timeout(5000)
+            except Exception:
+                break
+
+        # Wait for the challenge to resolve (page navigates away from challenge)
         await page.wait_for_function(
-            "() => !document.querySelector('#challenge-running') && "
-            "!document.querySelector('#challenge-form') && "
-            "!document.querySelector('.cf-browser-verification')",
+            """() => {
+                return !document.querySelector('#challenge-running')
+                    && !document.querySelector('#challenge-form')
+                    && !document.querySelector('.cf-browser-verification')
+                    && !document.title.includes('instant');
+            }""",
             timeout=timeout,
         )
+        logger.debug("Cloudflare challenge resolved")
+
     except Exception:
         pass  # No challenge present or already resolved
 
@@ -23,7 +50,6 @@ async def wait_for_cloudflare(page: Page, timeout: int = 30000) -> None:
 async def is_logged_in(page: Page) -> bool:
     """Check if the user is currently logged in."""
     try:
-        # Look for "Mon Profil" in the navigation (visible in screenshots)
         profile_link = page.locator("text=Mon Profil").first
         return await profile_link.is_visible(timeout=3000)
     except Exception:
@@ -45,8 +71,7 @@ async def login(page: Page, context: BrowserContext, config: Config) -> bool:
     logger.info("Logging in as %s...", config.username)
 
     try:
-        # Fill login form - try common selectors
-        # Username/email field
+        # Fill login form
         username_field = (
             page.locator('input[name="username"]')
             .or_(page.locator('input[name="email"]'))
@@ -57,11 +82,9 @@ async def login(page: Page, context: BrowserContext, config: Config) -> bool:
         ).first
         await username_field.fill(config.username, timeout=10000)
 
-        # Password field
         password_field = page.locator('input[type="password"]').first
         await password_field.fill(config.password, timeout=10000)
 
-        # Submit button
         submit_btn = (
             page.locator('button[type="submit"]')
             .or_(page.get_by_role("button", name="Connexion"))
