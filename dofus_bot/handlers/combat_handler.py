@@ -19,35 +19,27 @@ Key message prefixes (Dofus 1.29 Retro):
 from __future__ import annotations
 
 import logging
-from typing import Awaitable, Callable, List
+from typing import Optional
 
 from ..game.state import FightEntity, GameState
+from ..scripting.events import EventBus
 
 logger = logging.getLogger(__name__)
 
-EventCallback = Callable[[dict], Awaitable[None]]
-
 
 class CombatHandler:
-    def __init__(self, state: GameState) -> None:
+    def __init__(
+        self,
+        state: GameState,
+        event_bus: Optional[EventBus] = None,
+    ) -> None:
         self.state = state
-        self._listeners: dict[str, List[EventCallback]] = {}
+        self._bus = event_bus
         self._turn_number = 0
 
-    # ------------------------------------------------------------------ #
-    # Event subscription (used by the scripting layer)
-    # ------------------------------------------------------------------ #
-
-    def on(self, event: str, callback: EventCallback) -> None:
-        self._listeners.setdefault(event, []).append(callback)
-
     async def _emit(self, event: str, payload: dict | None = None) -> None:
-        data = payload or {}
-        for cb in self._listeners.get(event, ()):
-            try:
-                await cb(data)
-            except Exception:
-                logger.exception("Combat event listener failed: %s", event)
+        if self._bus is not None:
+            await self._bus.emit(event, payload or {})
 
     # ------------------------------------------------------------------ #
     # Packet handlers
@@ -114,6 +106,21 @@ class CombatHandler:
                     entity.mp = int(fields[3])
                 except ValueError:
                     pass
+
+            # If this update is for our own character, keep Character.hp
+            # in sync and fire hp_low below a 40% threshold. Scripts can
+            # use that hook for kite/heal decisions.
+            if entity_id == self.state.character.character_id:
+                self.state.character.hp = entity.hp
+                self.state.character.ap = entity.ap
+                self.state.character.mp = entity.mp
+                self.state.character.cell_id = entity.cell_id if entity.cell_id >= 0 else self.state.character.cell_id
+                max_hp = self.state.character.max_hp
+                if max_hp > 0 and entity.hp <= max_hp * 0.4:
+                    await self._emit(
+                        "hp_low",
+                        {"hp": entity.hp, "max_hp": max_hp},
+                    )
 
     async def on_turn_end(self, message: str) -> None:
         """``GTE<entityId>``"""

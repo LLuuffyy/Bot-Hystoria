@@ -23,11 +23,13 @@ les paquets reseau pour automatiser ce que tu veux via des scripts Lua.
 - [x] Routeur de messages par prefixe
 - [x] Parsers de base : entree de map (`GDM`), acteurs (`GM`), combat (`GJK`/`GTS`/`GTM`/`GTE`/`GE`)
 - [x] Mode `--proxy` : lance le proxy et log tout le trafic
-- [ ] API Lua (`bot.character.hp`, `bot:cast(...)`, `bot:on("turn_start", ...)`)
+- [x] API Lua (`bot.character.hp`, `bot:cast(...)`, `bot:on("turn_start", ...)`)
+- [x] Injection de paquets (`GA300` sort, `GA900` combat, `GA903` fin de tour, raw `bot:send`)
+- [x] Bus d'evenements (`fight_start`, `turn_start`, `hp_low`, `map_change`, ...)
+- [x] Recharge des scripts a chaud (surveillance du mtime)
 - [ ] Moteur de rotation de sorts declaratif (turns[1] = {...}, turns[2] = {...})
-- [ ] Recherche/engagement automatique des monstres sur la map
-- [ ] Auto-heal post-combat
-- [ ] Recharge des scripts a chaud
+- [ ] Pathfinding + injection de deplacement (`GA0;1;charId;encodedPath`)
+- [ ] Auto-heal hors combat (utilisation d'items)
 
 ## Setup Windows (mode simple)
 
@@ -154,39 +156,95 @@ Ce n'est pas un bug : on en est a l'etape "observation". Le bot ne
 **fait rien** pour l'instant, il se contente de logger. Les scripts
 qui injectent des actions arrivent dans la prochaine iteration.
 
-## Ce que tes scripts Lua vont pouvoir faire (bientot)
+## Scripts Lua
 
-```lua
--- data/scripts/examples/farm_cra.lua
-return {
-  turns = {
-    [1] = {
-      { spell = "fleche_magique", target = "closest" },
-      { spell = "fleche_magique", target = "closest" },
-      { action = "move_melee",    target = "closest" },
-    },
-    [2] = {
-      { spell = "pression",       target = "weakest" },
-      { spell = "fleche_magique", target = "closest" },
-    },
-  },
+Le moteur Lua (via [`lupa`](https://pypi.org/project/lupa/)) charge un
+fichier `.lua` depuis `dofus_bot/data/scripts/` et l'execute dans un
+thread dedie. Les scripts utilisent l'objet global `bot` pour lire
+l'etat du jeu et injecter des paquets a travers le proxy MITM.
 
-  after_fight = function(bot)
-    if bot.character.hp < bot.character.max_hp * 0.7 then
-      bot:use_item("pain_complet")
-      bot:wait(3)
-    end
-  end,
+### Lancer un script
 
-  farming = {
-    maps = { 7411, 7412, 7413, 7668 },
-    target = "bouftou",
-  },
-}
+```
+python -m dofus_bot --proxy --script examples/hello.lua
 ```
 
-Rotation de sorts par tour, action apres combat, route de maps : tout
-sera declaratif et facile a modifier sans toucher au code Python.
+Ou via `.env` :
+
+```
+DOFUS_SCRIPT=examples/combat_cra.lua
+```
+
+### API exposee
+
+Lecture d'etat (tout en direct, mis a jour par les handlers) :
+
+```lua
+bot.character.hp, bot.character.max_hp
+bot.character.ap, bot.character.mp
+bot.character.cell, bot.character.map_id
+bot.character.name, bot.character.level, bot.character.kamas
+
+bot.fight.is_active, bot.fight.my_turn
+bot.fight.enemies    -- {{id, cell, hp, max_hp, ap, mp}, ...}
+bot.fight.allies
+
+bot.map.id
+bot.map.actors       -- tous les acteurs
+bot.map.monsters     -- seulement les monstres
+bot.map.players      -- seulement les joueurs
+```
+
+Actions (injectent directement dans la session MITM) :
+
+```lua
+bot:log("message")                       -- ecrit dans logs/dofus_bot.log
+bot:wait(seconds)                        -- pause du script
+
+bot:cast(spell_id, target_cell)          -- GA300;spellId;cell
+bot:cast_on_enemy(spell_id, enemy_id)    -- resout la cell puis GA300
+bot:end_turn()                           -- GA903
+bot:engage(monster_group_id)             -- GA900;groupId
+bot:send("GA300;161;234")                -- paquet brut (echappatoire)
+
+bot:closest_enemy()                      -- helper
+bot:weakest_enemy()                      -- helper
+```
+
+Evenements (un meme script peut en enregistrer autant qu'il veut) :
+
+```lua
+bot:on("fight_start",   function(data) ... end)
+bot:on("fight_end",     function(data) ... end)
+bot:on("turn_start",    function(data) ... end)  -- data.turn, data.entity_id
+bot:on("turn_end",      function(data) ... end)
+bot:on("map_change",    function(data) ... end)  -- data.map_id
+bot:on("actors_update", function(data) ... end)  -- data.count
+bot:on("hp_low",        function(data) ... end)  -- data.hp, data.max_hp
+```
+
+### Exemples fournis
+
+- `examples/hello.lua` - sanity-check, log un message et reagit a
+  quelques evenements.
+- `examples/combat_cra.lua` - rotation basique de Cra : cible le plus
+  faible, spam Fleche Magique tant qu'il reste du PA, passe le tour.
+- `examples/auto_heal.lua` - reagit a l'evenement `hp_low` (en dessous
+  de 40 pct de la vie max).
+- `examples/farm_bouftous.lua` - engage automatiquement le monstre le
+  plus proche a chaque arrivee sur une nouvelle map.
+
+### Hot reload
+
+Le moteur surveille le `mtime` du fichier source toutes les secondes.
+Quand tu sauvegardes ton script, il est recharge automatiquement sans
+couper la session du client. Pratique pour iterer.
+
+### Sandbox
+
+Les modules Lua dangereux (`os`, `io`, `package`, `debug`, `require`,
+`loadfile`, ...) sont retires du runtime avant le chargement du
+script. Il reste `math`, `string`, `table`, `coroutine` et `bot`.
 
 ## Architecture interne
 
@@ -206,16 +264,24 @@ dofus_bot/
     crypto.py             # Hash mot de passe (garde au cas ou, pas utilise en MITM)
 
   handlers/
-    map_handler.py        # GDM, GM -> GameState.current_map_id, actors
-    combat_handler.py     # GJK/GTS/GTM/GTE/GE -> GameState.fight_*
+    map_handler.py        # GDM, GM -> GameState + EventBus.map_change
+    combat_handler.py     # GJK/GTS/GTM/GTE/GE -> GameState + EventBus.fight_*
 
   game/
     state.py              # GameState partage (Character, Actor, FightEntity)
 
-  scripting/              # (vide pour l'instant - prochaine iteration)
+  scripting/
+    events.py             # EventBus (fight_start, turn_start, hp_low, ...)
+    api.py                # BotAPI : etat + actions exposees a Lua
+    engine.py             # LuaEngine : thread worker + hot reload
+    sandbox.py            # Retire os/io/require du runtime Lua
 
   data/
     scripts/
-      examples/           # Scripts d'exemple (a venir)
+      examples/
+        hello.lua         # Sanity check
+        combat_cra.lua    # Rotation Cra basique
+        auto_heal.lua     # Reaction a hp_low
+        farm_bouftous.lua # Engage auto le monstre le plus proche
       my_scripts/         # Tes propres scripts (gitignored)
 ```

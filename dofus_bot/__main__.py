@@ -5,9 +5,10 @@ Usage:
         Start the MITM proxy and log every packet passing through.
         Safe first run: no injection, no script loaded.
 
-    python -m dofus_bot --proxy --script examples/farm_cra.lua
-        (Not implemented yet) start the proxy AND load a Lua script
-        that drives combat / farming via injected packets.
+    python -m dofus_bot --proxy --script examples/combat_cra.lua
+        Start the proxy AND load a Lua script that drives combat /
+        farming via injected packets. The script path is resolved
+        relative to ``dofus_bot/data/scripts/``.
 
 Stop cleanly with Ctrl-C.
 """
@@ -17,6 +18,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+from pathlib import Path
+from typing import Optional
 
 from .config import DofusConfig
 from .game.state import GameState
@@ -25,14 +28,20 @@ from .handlers.map_handler import MapHandler
 from .logger import setup_dofus_logging
 from .network.proxy import DofusProxy
 from .protocol.router import MessageRouter
+from .scripting import EventBus, LuaEngine, LuaUnavailableError
 
 logger = logging.getLogger("dofus_bot.main")
 
+SCRIPTS_ROOT = Path(__file__).parent / "data" / "scripts"
 
-def build_routers(state: GameState) -> tuple[MessageRouter, MessageRouter, CombatHandler]:
+
+def build_routers(
+    state: GameState,
+    event_bus: EventBus,
+) -> tuple[MessageRouter, MessageRouter]:
     """Wire up packet handlers to two routers (client->server, server->client)."""
-    map_handler = MapHandler(state)
-    combat_handler = CombatHandler(state)
+    map_handler = MapHandler(state, event_bus=event_bus)
+    combat_handler = CombatHandler(state, event_bus=event_bus)
 
     # Server -> client router: everything the server tells us about the world
     server_router = MessageRouter()
@@ -49,12 +58,34 @@ def build_routers(state: GameState) -> tuple[MessageRouter, MessageRouter, Comba
     # sends when the user clicks a monster).
     client_router = MessageRouter()
 
-    return client_router, server_router, combat_handler
+    return client_router, server_router
+
+
+def resolve_script_path(script_arg: str) -> Path:
+    """Resolve a CLI/env script path.
+
+    Accepts:
+    - absolute paths
+    - paths relative to the current working directory
+    - paths relative to ``dofus_bot/data/scripts/`` (preferred form)
+    """
+    candidate = Path(script_arg).expanduser()
+    if candidate.is_absolute() and candidate.exists():
+        return candidate
+    if candidate.exists():
+        return candidate.resolve()
+    inside = SCRIPTS_ROOT / candidate
+    if inside.exists():
+        return inside.resolve()
+    # Fall through: return the "inside" path so the caller gets a
+    # clear FileNotFoundError pointing at where we looked.
+    return inside
 
 
 async def run_proxy(config: DofusConfig) -> None:
     state = GameState()
-    client_router, server_router, combat_handler = build_routers(state)
+    event_bus = EventBus()
+    client_router, server_router = build_routers(state, event_bus)
 
     proxy = DofusProxy(
         listen_host=config.proxy_host,
@@ -65,13 +96,38 @@ async def run_proxy(config: DofusConfig) -> None:
     proxy.on_client_message(client_router.dispatch)
     proxy.on_server_message(server_router.dispatch)
 
+    engine: Optional[LuaEngine] = None
+    if config.script:
+        script_path = resolve_script_path(config.script)
+        try:
+            engine = LuaEngine(
+                script_path=script_path,
+                state=state,
+                proxy=proxy,
+                event_bus=event_bus,
+                loop=asyncio.get_running_loop(),
+            )
+            await engine.start()
+        except FileNotFoundError:
+            logger.error(
+                "Lua script not found: %s (looked in cwd and %s)",
+                config.script, SCRIPTS_ROOT,
+            )
+            engine = None
+        except LuaUnavailableError as exc:
+            logger.error("Cannot load script: %s", exc)
+            engine = None
+
     logger.info("=" * 60)
     logger.info("Dofus MITM proxy")
     logger.info("  listen   : %s:%d  <-- point your Dofus client here",
                 config.proxy_host, config.proxy_port)
     logger.info("  upstream : %s:%d",
                 config.upstream_host, config.upstream_port)
-    logger.info("  script   : %s", config.script or "(none)")
+    if engine is not None:
+        logger.info("  script   : %s", engine.script_path)
+    else:
+        logger.info("  script   : (none)")
     logger.info("=" * 60)
     logger.info("Waiting for the Dofus client to connect...")
 
@@ -80,6 +136,8 @@ async def run_proxy(config: DofusConfig) -> None:
     except asyncio.CancelledError:
         pass
     finally:
+        if engine is not None:
+            await engine.stop()
         await proxy.stop()
 
 

@@ -14,15 +14,22 @@ The goal is to extract the pieces the scripting layer actually needs
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
 from ..game.state import Actor, GameState
+from ..scripting.events import EventBus
 
 logger = logging.getLogger(__name__)
 
 
 class MapHandler:
-    def __init__(self, state: GameState) -> None:
+    def __init__(
+        self,
+        state: GameState,
+        event_bus: Optional[EventBus] = None,
+    ) -> None:
         self.state = state
+        self._bus = event_bus
 
     async def on_map_data(self, message: str) -> None:
         """``GDM|<mapId>|<createDate>|<dataKey>``.
@@ -40,6 +47,8 @@ class MapHandler:
             return
         self.state.reset_map(map_id)
         logger.info("Entered map %d", map_id)
+        if self._bus is not None:
+            await self._bus.emit("map_change", {"map_id": map_id})
 
     async def on_map_actors(self, message: str) -> None:
         """``GM|+<actor>|+<actor>|...``  (additions / initial listing)
@@ -87,4 +96,9 @@ class MapHandler:
                 cell_id=cell_id,
                 name=name,
                 is_monster=is_monster,
+            )
+        if self._bus is not None:
+            await self._bus.emit(
+                "actors_update",
+                {"count": len(self.state.actors)},
             )
