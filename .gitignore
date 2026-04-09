@@ -13,6 +13,10 @@ build/
 state/
 logs/
 
+# dofus_bot
+dofus_bot/data/maps/cache/
+dofus_bot/data/scripts/my_scripts/
+
 # IDE
 .vscode/
 .idea/
