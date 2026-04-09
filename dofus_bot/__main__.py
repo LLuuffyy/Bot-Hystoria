@@ -25,6 +25,7 @@ from .config import DofusConfig
 from .game.state import GameState
 from .handlers.combat_handler import CombatHandler
 from .handlers.map_handler import MapHandler
+from .handlers.stats_handler import StatsHandler
 from .logger import setup_dofus_logging
 from .network.proxy import DofusProxy
 from .protocol.router import MessageRouter
@@ -42,9 +43,12 @@ def build_routers(
     """Wire up packet handlers to two routers (client->server, server->client)."""
     map_handler = MapHandler(state, event_bus=event_bus)
     combat_handler = CombatHandler(state, event_bus=event_bus)
+    stats_handler = StatsHandler(state, event_bus=event_bus)
 
     # Server -> client router: everything the server tells us about the world
     server_router = MessageRouter()
+    server_router.register("ASK", stats_handler.on_character_selected)
+    server_router.register("As", stats_handler.on_stats)
     server_router.register("GDM", map_handler.on_map_data)
     server_router.register("GM", map_handler.on_map_actors)
     server_router.register("GJK", combat_handler.on_fight_join)
