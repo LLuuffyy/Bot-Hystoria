@@ -25,7 +25,10 @@ import logging
 import time
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
+from ..game.map_data import DofusMap
+from ..game.pathfinding import astar
 from ..game.state import GameState
+from ..protocol.path import encode_path
 
 if TYPE_CHECKING:  # avoid circular + optional imports
     from ..network.proxy import DofusProxy
@@ -191,11 +194,16 @@ class BotAPI:
         proxy: "DofusProxy",
         loop: asyncio.AbstractEventLoop,
         engine: Any,  # LuaEngine (avoid circular import)
+        dmap: Optional[DofusMap] = None,
     ) -> None:
         self._state = state
         self._proxy = proxy
         self._loop = loop
         self._engine = engine
+
+        # Shared topology used by the pathfinder. Can be swapped at
+        # runtime by scripts that know a map has unusual dimensions.
+        self._dmap: DofusMap = dmap or DofusMap()
 
         # Lua-visible nested objects. Lupa exposes ``bot.character.hp``
         # as Python attribute access, so the script can write the usual
@@ -283,6 +291,82 @@ class BotAPI:
         self.send(f"GA900;{int(monster_group_id)}")
 
     # ------------------------------------------------------------------ #
+    # Movement primitives
+    # ------------------------------------------------------------------ #
+
+    def set_map_size(self, width: int, height: int) -> None:
+        """Override the default 14x40 grid used by the pathfinder.
+
+        Most Amakna maps fit the default. Call this from a script if
+        you know the current map has a custom layout (Incarnam
+        tutorial rooms, some dungeons, ...).
+        """
+        self._dmap = DofusMap(width=int(width), height=int(height))
+
+    def block_cells(self, cells: Any) -> None:
+        """Mark one or more cells as non-walkable for the pathfinder.
+
+        ``cells`` may be a single integer or a Lua table of integers.
+        """
+        self._dmap.block(_iter_cells(cells))
+
+    def unblock_cells(self, cells: Any) -> None:
+        """Opposite of :meth:`block_cells`."""
+        self._dmap.unblock(_iter_cells(cells))
+
+    def path_to(self, target_cell: int) -> List[int]:
+        """Compute an A* path from the current cell to *target_cell*.
+
+        Returns a list of cell ids (start included, goal included)
+        or an empty list if no path is found.
+        """
+        start = self._state.character.cell_id
+        if start < 0:
+            return []
+        return astar(self._dmap, start, int(target_cell))
+
+    def move_to(self, target_cell: int) -> bool:
+        """``bot:move_to(cellId)`` - walk to *target_cell* on the current map.
+
+        Computes a path with A* and injects a single ``GA0;1`` packet
+        with the full encoded path. Returns ``True`` if the packet was
+        dispatched, ``False`` if the bot has no known position, no
+        character id, or if no path exists.
+
+        This method does NOT wait for the server to confirm the walk.
+        Use ``bot:wait(seconds)`` or the ``character_moved`` event to
+        synchronise follow-up actions.
+        """
+        target = int(target_cell)
+        char_id = self._state.character.character_id
+        if char_id <= 0:
+            logger.debug("move_to: character id unknown yet")
+            return False
+        path = self.path_to(target)
+        if not path or len(path) < 2:
+            logger.debug(
+                "move_to: no path from %d to %d",
+                self._state.character.cell_id, target,
+            )
+            return False
+        try:
+            encoded = encode_path(path, self._dmap)
+        except ValueError as exc:
+            logger.debug("move_to: could not encode path: %s", exc)
+            return False
+        packet = f"GA0;1;{char_id};{encoded}"
+        self.send(packet)
+        return True
+
+    def move_to_xy(self, x: int, y: int) -> bool:
+        """``bot:move_to_xy(x, y)`` - same as :meth:`move_to` but by coords."""
+        return self.move_to(self._dmap.xy_to_cell(int(x), int(y)))
+
+    def distance(self, cell_a: int, cell_b: int) -> int:
+        """``bot:distance(a, b)`` - Chebyshev distance on the grid."""
+        return self._dmap.distance(int(cell_a), int(cell_b))
+
+    # ------------------------------------------------------------------ #
     # Helpers
     # ------------------------------------------------------------------ #
 
@@ -339,3 +423,27 @@ class BotAPI:
             logger.warning("Packet injection timed out")
         except Exception:
             logger.exception("Packet injection failed")
+
+
+def _iter_cells(cells: Any):
+    """Accept an int or a Lua/Python iterable of ints and yield ints."""
+    if isinstance(cells, (int, float)):
+        yield int(cells)
+        return
+    # Lua tables come through lupa as objects with ``values()``.
+    values = getattr(cells, "values", None)
+    if callable(values):
+        for v in values():
+            try:
+                yield int(v)
+            except (TypeError, ValueError):
+                continue
+        return
+    try:
+        for v in cells:  # plain iterable / list
+            try:
+                yield int(v)
+            except (TypeError, ValueError):
+                continue
+    except TypeError:
+        return

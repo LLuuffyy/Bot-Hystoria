@@ -27,9 +27,13 @@ les paquets reseau pour automatiser ce que tu veux via des scripts Lua.
 - [x] Injection de paquets (`GA300` sort, `GA900` combat, `GA903` fin de tour, raw `bot:send`)
 - [x] Bus d'evenements (`fight_start`, `turn_start`, `hp_low`, `map_change`, ...)
 - [x] Recharge des scripts a chaud (surveillance du mtime)
+- [x] Stats handler : remplit `character.id/name/level/hp/ap/mp` via `ASK`/`As`
+- [x] Pathfinding A* sur grille losange + encodage du path
+- [x] Injection de deplacement (`GA0;1;charId;encodedPath`) via `bot:move_to`
+- [x] Suivi des walks (GA0) : met a jour la cell des acteurs et emet `character_moved`
 - [ ] Moteur de rotation de sorts declaratif (turns[1] = {...}, turns[2] = {...})
-- [ ] Pathfinding + injection de deplacement (`GA0;1;charId;encodedPath`)
 - [ ] Auto-heal hors combat (utilisation d'items)
+- [ ] Pathfinding multi-maps (WorldGraph)
 
 ## Setup Windows (mode simple)
 
@@ -152,9 +156,16 @@ Le client Dofus ne tente pas de se connecter au proxy. Verifications :
 
 ### Je vois les paquets mais mon perso ne bouge pas
 
-Ce n'est pas un bug : on en est a l'etape "observation". Le bot ne
-**fait rien** pour l'instant, il se contente de logger. Les scripts
-qui injectent des actions arrivent dans la prochaine iteration.
+Par defaut le bot est en mode "observation" : il log tout mais
+n'injecte aucun paquet. Pour qu'il agisse, il faut charger un script :
+
+```
+python -m dofus_bot --proxy --script examples/explore.lua
+```
+
+Si le script tourne mais que le perso reste immobile, verifie dans
+les logs que le `character_id` et la `cell_id` sont connus (attends
+l'evenement `character_ready` avant de bouger).
 
 ## Scripts Lua
 
@@ -207,20 +218,47 @@ bot:end_turn()                           -- GA903
 bot:engage(monster_group_id)             -- GA900;groupId
 bot:send("GA300;161;234")                -- paquet brut (echappatoire)
 
+bot:move_to(cell_id)                     -- A* + GA0;1;charId;encodedPath
+bot:move_to_xy(x, y)                     -- idem, en coordonnees grille
+bot:path_to(cell_id)                     -- calcule le chemin sans l'envoyer
+bot:distance(cell_a, cell_b)             -- distance de Chebyshev
+bot:block_cells({123, 456})              -- marque des cells non-walkables
+bot:unblock_cells({123})                 -- annule un block precedent
+bot:set_map_size(width, height)          -- override la taille 14x40 par defaut
+
 bot:closest_enemy()                      -- helper
 bot:weakest_enemy()                      -- helper
 ```
 
+Notes sur le deplacement :
+
+- `bot:move_to` envoie **un seul** paquet au serveur, contenant tout le
+  chemin encode. C'est comme cliquer une fois avec la souris en jeu.
+- Le perso a besoin d'un `character_id` connu (recu via `ASK`) **et**
+  d'une `cell_id` connue (recue via `GDM` au moment d'entrer sur la
+  map). Tant que l'un ou l'autre manque, `move_to` retourne `false`
+  sans rien envoyer.
+- Le pathfinder utilise une grille losange 14x40 par defaut. La plupart
+  des maps Amakna fittent. Si tu tombes sur une map plus petite ou plus
+  grande (Incarnam, donjons...), appelle `bot:set_map_size(w, h)` avant
+  de replanifier.
+- La walkability n'est pas extraite des paquets serveur pour l'instant :
+  toutes les cases sont reputees walkables sauf celles marquees via
+  `bot:block_cells`. C'est suffisant pour des deplacements sur des maps
+  ouvertes, pas pour slalomer entre des obstacles.
+
 Evenements (un meme script peut en enregistrer autant qu'il veut) :
 
 ```lua
-bot:on("fight_start",   function(data) ... end)
-bot:on("fight_end",     function(data) ... end)
-bot:on("turn_start",    function(data) ... end)  -- data.turn, data.entity_id
-bot:on("turn_end",      function(data) ... end)
-bot:on("map_change",    function(data) ... end)  -- data.map_id
-bot:on("actors_update", function(data) ... end)  -- data.count
-bot:on("hp_low",        function(data) ... end)  -- data.hp, data.max_hp
+bot:on("fight_start",      function(data) ... end)
+bot:on("fight_end",        function(data) ... end)
+bot:on("turn_start",       function(data) ... end)  -- data.turn, data.entity_id
+bot:on("turn_end",         function(data) ... end)
+bot:on("map_change",       function(data) ... end)  -- data.map_id
+bot:on("actors_update",    function(data) ... end)  -- data.count
+bot:on("hp_low",           function(data) ... end)  -- data.hp, data.max_hp
+bot:on("character_ready",  function(data) ... end)  -- data.id, data.name, data.level
+bot:on("character_moved",  function(data) ... end)  -- data.from, data.to, data.path
 ```
 
 ### Exemples fournis
@@ -233,6 +271,8 @@ bot:on("hp_low",        function(data) ... end)  -- data.hp, data.max_hp
   de 40 pct de la vie max).
 - `examples/farm_bouftous.lua` - engage automatiquement le monstre le
   plus proche a chaque arrivee sur une nouvelle map.
+- `examples/explore.lua` - fait tourner le perso en rectangle sur la
+  map courante pour tester le pathfinder et `character_moved`.
 
 ### Hot reload
 
@@ -266,9 +306,16 @@ dofus_bot/
   handlers/
     map_handler.py        # GDM, GM -> GameState + EventBus.map_change
     combat_handler.py     # GJK/GTS/GTM/GTE/GE -> GameState + EventBus.fight_*
+    stats_handler.py      # ASK, As -> character.id/name/level/hp/ap/mp + character_ready
+    movement_handler.py   # GA0 (walk) -> update cell + EventBus.character_moved
 
   game/
     state.py              # GameState partage (Character, Actor, FightEntity)
+    map_data.py           # DofusMap : grille losange 14x40, neighbors, walkability
+    pathfinding.py        # A* admissible (Chebyshev) sur la grille
+
+  protocol/
+    path.py               # encode_cell/decode_cell (2 chars) + encode_path/decode_path
 
   scripting/
     events.py             # EventBus (fight_start, turn_start, hp_low, ...)
@@ -283,5 +330,6 @@ dofus_bot/
         combat_cra.lua    # Rotation Cra basique
         auto_heal.lua     # Reaction a hp_low
         farm_bouftous.lua # Engage auto le monstre le plus proche
+        explore.lua       # Demo pathfinding : walk en rectangle
       my_scripts/         # Tes propres scripts (gitignored)
 ```

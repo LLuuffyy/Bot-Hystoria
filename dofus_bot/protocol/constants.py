@@ -12,12 +12,20 @@ payload. Sub-fields are usually pipe-delimited (``|``).
 """
 
 # Character set used by Dofus for its custom base-64-like encoding of
-# passwords and movement paths. Order matters.
+# passwords, cell ids and movement paths. Order matters - this is the
+# canonical order used by kralamoure/retroproto and jomisoac/Bot-Dofus:
+#
+#   "-_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+#
+# Index 0 is '-', index 1 is '_', then the 26 lowercase letters, then
+# the 26 uppercase letters, then the 10 digits. Total: 64 characters.
 HASH_CHARS = (
+    "-_"
     "abcdefghijklmnopqrstuvwxyz"
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    "0123456789-_"
+    "0123456789"
 )
+assert len(HASH_CHARS) == 64, "HASH_CHARS must stay at 64 chars (base64-ish)"
 
 # Known message prefixes grouped by subsystem. This list is NOT exhaustive;
 # it's a practical subset used by the handlers. Three-letter prefixes are
