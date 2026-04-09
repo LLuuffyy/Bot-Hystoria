@@ -25,7 +25,7 @@ async def attempt_vote(page: Page, context: BrowserContext, config: Config) -> V
         await page.goto(config.vote_url, wait_until="networkidle", timeout=60000)
         await wait_for_cloudflare(page)
 
-        # Wait a moment for the page to fully render (JS-rendered content)
+        # Wait for the page to fully render (JS-rendered content)
         await page.wait_for_timeout(2000)
 
         # Check if we're redirected to login (not logged in)
@@ -43,7 +43,7 @@ async def attempt_vote(page: Page, context: BrowserContext, config: Config) -> V
             logger.warning("Could not verify login status")
             return VoteResult.NOT_LOGGED_IN
 
-        # Detect page state: vote available or cooldown?
+        # Detect page state using exact IDs from the HTML
         return await _detect_and_act(page, context, config)
 
     except Exception as e:
@@ -55,64 +55,111 @@ async def attempt_vote(page: Page, context: BrowserContext, config: Config) -> V
 async def _detect_and_act(page: Page, context: BrowserContext, config: Config) -> VoteResult:
     """Detect the vote page state and act accordingly."""
 
-    # Check if cooldown is active
-    cooldown_indicators = [
-        page.locator("text=cooldown").first,
-        page.locator("text=PATIENTE").first,
-        page.locator("text=Patiente").first,
-    ]
-    for indicator in cooldown_indicators:
-        try:
-            if await indicator.is_visible(timeout=2000):
-                logger.info("Vote is on cooldown")
-                return VoteResult.COOLDOWN
-        except Exception:
-            continue
-
-    # Look for the vote button
-    vote_btn = (
-        page.locator("button:has-text('VOTER')")
-        .or_(page.locator("a:has-text('VOTER')"))
-        .or_(page.locator("button:has-text('Voter')"))
-        .or_(page.locator("a:has-text('Voter')"))
-        .or_(page.get_by_role("button", name="VOTER"))
-        .or_(page.get_by_role("link", name="VOTER"))
-    ).first
-
+    # Read the vote status from #voteStatusCard class
+    # HTML: <div id="voteStatusCard" class="vote-status-card available">
+    # When cooldown: class changes (e.g. "vote-status-card cooldown")
+    status_card = page.locator("#voteStatusCard")
     try:
-        if await vote_btn.is_visible(timeout=5000):
-            logger.info("Vote button found! Clicking...")
+        card_class = await status_card.get_attribute("class", timeout=5000) or ""
+    except Exception:
+        card_class = ""
+
+    # Also read the title: <h4 id="voteStatusTitle">Vote Disponible !</h4>
+    status_title = ""
+    try:
+        status_title = await page.locator("#voteStatusTitle").text_content(timeout=3000) or ""
+    except Exception:
+        pass
+
+    logger.debug("Vote card class: '%s', title: '%s'", card_class, status_title)
+
+    # --- COOLDOWN STATE ---
+    if "cooldown" in card_class.lower() or "cooldown" in status_title.lower():
+        logger.info("Vote is on cooldown (title: %s)", status_title)
+        return VoteResult.COOLDOWN
+
+    # Also check for the PATIENTE button as fallback
+    try:
+        patiente = page.locator("text=PATIENTE").first
+        if await patiente.is_visible(timeout=1000):
+            logger.info("Vote is on cooldown (PATIENTE button visible)")
+            return VoteResult.COOLDOWN
+    except Exception:
+        pass
+
+    # --- VOTE AVAILABLE STATE ---
+    if "available" in card_class.lower() or "Disponible" in status_title:
+        logger.info("Vote is available! (title: %s)", status_title)
+
+        # Click the vote button: <button id="btnGenerateOTP" class="btn-vote-primary">
+        vote_btn = page.locator("#btnGenerateOTP")
+        try:
+            await vote_btn.wait_for(state="visible", timeout=5000)
+            logger.info("Clicking vote button (#btnGenerateOTP)...")
             await vote_btn.click()
 
             # Wait for the vote to be processed
-            await page.wait_for_load_state("networkidle", timeout=30000)
             await page.wait_for_timeout(3000)
 
-            # Verify vote was successful by checking for cooldown state
-            success_indicators = [
-                page.locator("text=cooldown").first,
-                page.locator("text=PATIENTE").first,
-                page.locator("text=+50").first,
-            ]
-            for indicator in success_indicators:
-                try:
-                    if await indicator.is_visible(timeout=5000):
-                        logger.info("Vote successful! Rewards earned.")
-                        await save_cookies(context, config)
-                        return VoteResult.SUCCESS
-                except Exception:
-                    continue
+            # The vote might open a new tab/page (OTP = external vote site)
+            # Check if a new page/popup was opened
+            pages = page.context.pages
+            if len(pages) > 1:
+                new_page = pages[-1]
+                logger.info("New tab opened: %s", new_page.url)
+                await new_page.wait_for_load_state("networkidle", timeout=30000)
+                # Close the external vote page after it loads
+                await new_page.close()
+                logger.info("External vote tab closed")
 
-            # If we can't confirm success but no error, assume success
-            logger.info("Vote clicked - assuming success (could not verify)")
+            # Wait and check if btnManualCheck appears (manual verification step)
+            manual_btn = page.locator("#btnManualCheck")
+            try:
+                if await manual_btn.is_visible(timeout=5000):
+                    logger.info("Manual check button appeared, clicking...")
+                    await manual_btn.click()
+                    await page.wait_for_timeout(3000)
+            except Exception:
+                pass
+
+            # Wait for the page to update
+            await page.wait_for_load_state("networkidle", timeout=15000)
+            await page.wait_for_timeout(2000)
+
+            # Verify success: check if status changed to cooldown
+            try:
+                new_title = await page.locator("#voteStatusTitle").text_content(timeout=5000) or ""
+                new_class = await page.locator("#voteStatusCard").get_attribute("class", timeout=3000) or ""
+
+                if "cooldown" in new_class.lower() or "cooldown" in new_title.lower():
+                    logger.info("Vote confirmed successful! Status changed to cooldown.")
+                    await save_cookies(context, config)
+                    return VoteResult.SUCCESS
+            except Exception:
+                pass
+
+            # Check for reward modal
+            try:
+                reward_modal = page.locator("#rewardModal")
+                if await reward_modal.is_visible(timeout=3000):
+                    logger.info("Reward modal appeared - vote successful!")
+                    await save_cookies(context, config)
+                    return VoteResult.SUCCESS
+            except Exception:
+                pass
+
+            # If we clicked but can't confirm, assume success
+            logger.info("Vote button clicked - assuming success")
             await save_cookies(context, config)
             return VoteResult.SUCCESS
 
-    except Exception as e:
-        logger.warning("Could not find or click vote button: %s", e)
+        except Exception as e:
+            logger.warning("Error clicking vote button: %s", e)
+            await _take_debug_screenshot(page)
+            return VoteResult.ERROR
 
-    # If nothing matched, take a screenshot for debugging
-    logger.warning("Unexpected page state - could not determine vote availability")
+    # Unknown state
+    logger.warning("Unknown vote state - card class: '%s', title: '%s'", card_class, status_title)
     await _take_debug_screenshot(page)
     return VoteResult.ERROR
 
