@@ -56,15 +56,13 @@ async def _detect_and_act(page: Page, context: BrowserContext, config: Config) -
     """Detect the vote page state and act accordingly."""
 
     # Read the vote status from #voteStatusCard class
-    # HTML: <div id="voteStatusCard" class="vote-status-card available">
-    # When cooldown: class changes (e.g. "vote-status-card cooldown")
     status_card = page.locator("#voteStatusCard")
     try:
         card_class = await status_card.get_attribute("class", timeout=5000) or ""
     except Exception:
         card_class = ""
 
-    # Also read the title: <h4 id="voteStatusTitle">Vote Disponible !</h4>
+    # Read the title: <h4 id="voteStatusTitle">Vote Disponible !</h4>
     status_title = ""
     try:
         status_title = await page.locator("#voteStatusTitle").text_content(timeout=3000) or ""
@@ -78,7 +76,7 @@ async def _detect_and_act(page: Page, context: BrowserContext, config: Config) -
         logger.info("Vote is on cooldown (title: %s)", status_title)
         return VoteResult.COOLDOWN
 
-    # Also check for the PATIENTE button as fallback
+    # Fallback: check for PATIENTE button
     try:
         patiente = page.locator("text=PATIENTE").first
         if await patiente.is_visible(timeout=1000):
@@ -91,72 +89,100 @@ async def _detect_and_act(page: Page, context: BrowserContext, config: Config) -
     if "available" in card_class.lower() or "Disponible" in status_title:
         logger.info("Vote is available! (title: %s)", status_title)
 
-        # Click the vote button: <button id="btnGenerateOTP" class="btn-vote-primary">
+        # Step 1: Click #btnGenerateOTP on play-hystoria.net
+        # This opens serveur-prive.net in a new tab
         vote_btn = page.locator("#btnGenerateOTP")
         try:
             await vote_btn.wait_for(state="visible", timeout=5000)
-            logger.info("Clicking vote button (#btnGenerateOTP)...")
-            await vote_btn.click()
-
-            # Wait for the vote to be processed
-            await page.wait_for_timeout(3000)
-
-            # The vote might open a new tab/page (OTP = external vote site)
-            # Check if a new page/popup was opened
-            pages = page.context.pages
-            if len(pages) > 1:
-                new_page = pages[-1]
-                logger.info("New tab opened: %s", new_page.url)
-                await new_page.wait_for_load_state("networkidle", timeout=30000)
-                # Close the external vote page after it loads
-                await new_page.close()
-                logger.info("External vote tab closed")
-
-            # Wait and check if btnManualCheck appears (manual verification step)
-            manual_btn = page.locator("#btnManualCheck")
-            try:
-                if await manual_btn.is_visible(timeout=5000):
-                    logger.info("Manual check button appeared, clicking...")
-                    await manual_btn.click()
-                    await page.wait_for_timeout(3000)
-            except Exception:
-                pass
-
-            # Wait for the page to update
-            await page.wait_for_load_state("networkidle", timeout=15000)
-            await page.wait_for_timeout(2000)
-
-            # Verify success: check if status changed to cooldown
-            try:
-                new_title = await page.locator("#voteStatusTitle").text_content(timeout=5000) or ""
-                new_class = await page.locator("#voteStatusCard").get_attribute("class", timeout=3000) or ""
-
-                if "cooldown" in new_class.lower() or "cooldown" in new_title.lower():
-                    logger.info("Vote confirmed successful! Status changed to cooldown.")
-                    await save_cookies(context, config)
-                    return VoteResult.SUCCESS
-            except Exception:
-                pass
-
-            # Check for reward modal
-            try:
-                reward_modal = page.locator("#rewardModal")
-                if await reward_modal.is_visible(timeout=3000):
-                    logger.info("Reward modal appeared - vote successful!")
-                    await save_cookies(context, config)
-                    return VoteResult.SUCCESS
-            except Exception:
-                pass
-
-            # If we clicked but can't confirm, assume success
-            logger.info("Vote button clicked - assuming success")
-            await save_cookies(context, config)
-            return VoteResult.SUCCESS
-
         except Exception as e:
-            logger.warning("Error clicking vote button: %s", e)
+            logger.warning("Vote button #btnGenerateOTP not found: %s", e)
             await _take_debug_screenshot(page)
             return VoteResult.ERROR
+
+        # Listen for new tab/popup before clicking
+        logger.info("Clicking vote button (#btnGenerateOTP)...")
+        async with context.expect_page(timeout=15000) as new_page_info:
+            await vote_btn.click()
+
+        # Step 2: Handle the external vote page (serveur-prive.net)
+        try:
+            external_page = await new_page_info.value
+            logger.info("External vote tab opened: %s", external_page.url)
+
+            await external_page.wait_for_load_state("networkidle", timeout=30000)
+            await external_page.wait_for_timeout(2000)
+
+            # Click "Je vote maintenant" button on serveur-prive.net
+            vote_now_btn = (
+                external_page.locator("text=Je vote maintenant")
+                .or_(external_page.locator("a:has-text('Je vote maintenant')"))
+                .or_(external_page.locator("button:has-text('Je vote maintenant')"))
+            ).first
+
+            try:
+                await vote_now_btn.wait_for(state="visible", timeout=10000)
+                logger.info("Clicking 'Je vote maintenant' on serveur-prive.net...")
+                await vote_now_btn.click()
+
+                # Wait for the vote to be processed on the external site
+                await external_page.wait_for_load_state("networkidle", timeout=30000)
+                await external_page.wait_for_timeout(3000)
+                logger.info("External vote completed. Page: %s", external_page.url)
+
+            except Exception as e:
+                logger.warning("Could not click 'Je vote maintenant': %s", e)
+                await _take_debug_screenshot(external_page, prefix="external")
+
+            # Close the external tab
+            await external_page.close()
+            logger.info("External vote tab closed")
+
+        except Exception as e:
+            logger.warning("Error handling external vote page: %s", e)
+            # Close any extra tabs
+            for p in context.pages[1:]:
+                await p.close()
+
+        # Step 3: Back on play-hystoria.net - click #btnManualCheck if it appears
+        await page.bring_to_front()
+        await page.wait_for_timeout(2000)
+
+        manual_btn = page.locator("#btnManualCheck")
+        try:
+            if await manual_btn.is_visible(timeout=5000):
+                logger.info("Manual check button appeared, clicking #btnManualCheck...")
+                await manual_btn.click()
+                await page.wait_for_load_state("networkidle", timeout=15000)
+                await page.wait_for_timeout(3000)
+        except Exception:
+            pass
+
+        # Step 4: Verify success - check if status changed to cooldown
+        try:
+            new_title = await page.locator("#voteStatusTitle").text_content(timeout=5000) or ""
+            new_class = await page.locator("#voteStatusCard").get_attribute("class", timeout=3000) or ""
+
+            if "cooldown" in new_class.lower() or "cooldown" in new_title.lower():
+                logger.info("Vote confirmed successful! Status: %s", new_title)
+                await save_cookies(context, config)
+                return VoteResult.SUCCESS
+        except Exception:
+            pass
+
+        # Check for reward modal (#rewardModal)
+        try:
+            reward_modal = page.locator("#rewardModal")
+            if await reward_modal.is_visible(timeout=3000):
+                logger.info("Reward modal appeared - vote successful!")
+                await save_cookies(context, config)
+                return VoteResult.SUCCESS
+        except Exception:
+            pass
+
+        # If we went through the whole flow, assume success
+        logger.info("Vote flow completed - assuming success")
+        await save_cookies(context, config)
+        return VoteResult.SUCCESS
 
     # Unknown state
     logger.warning("Unknown vote state - card class: '%s', title: '%s'", card_class, status_title)
@@ -164,11 +190,11 @@ async def _detect_and_act(page: Page, context: BrowserContext, config: Config) -
     return VoteResult.ERROR
 
 
-async def _take_debug_screenshot(page: Page) -> None:
+async def _take_debug_screenshot(page: Page, prefix: str = "error") -> None:
     """Take a screenshot for debugging purposes."""
     try:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = f"logs/error_{timestamp}.png"
+        path = f"logs/{prefix}_{timestamp}.png"
         await page.screenshot(path=path)
         logger.info("Debug screenshot saved: %s", path)
     except Exception as e:
