@@ -1,7 +1,8 @@
-"""Configuration loader for dofus_bot.
+"""Configuration loader for dofus_bot (MITM mode).
 
-Loads credentials, server endpoint and runtime options from environment
-variables (via ``python-dotenv``, already used by the voting bot).
+Loaded from environment variables via ``python-dotenv``. Credentials
+are NOT needed here: in MITM mode the real Dofus client handles the
+login, the bot just watches the resulting traffic.
 """
 
 from __future__ import annotations
@@ -15,40 +16,37 @@ from dotenv import load_dotenv
 
 @dataclass
 class DofusConfig:
-    username: str
-    password: str
-    character: str
-    auth_host: str
-    auth_port: int
-    server_id: int
+    # Local proxy the Dofus client connects to.
+    proxy_host: str
+    proxy_port: int
+
+    # Real Hystoria server we forward traffic to.
+    upstream_host: str
+    upstream_port: int
+
+    # Optional Lua script path (relative to dofus_bot/data/scripts/).
     script: Optional[str]
+
     log_level: str
 
     @classmethod
     def load(cls) -> "DofusConfig":
         load_dotenv()
 
-        username = os.environ.get("DOFUS_USERNAME", "").strip()
-        password = os.environ.get("DOFUS_PASSWORD", "")
-        character = os.environ.get("DOFUS_CHARACTER", "").strip()
-        auth_host = os.environ.get("DOFUS_AUTH_HOST", "play-hystoria.net").strip()
-        auth_port = int(os.environ.get("DOFUS_AUTH_PORT", "443"))
-        server_id = int(os.environ.get("DOFUS_SERVER_ID", "0"))
+        proxy_host = os.environ.get("DOFUS_PROXY_HOST", "127.0.0.1").strip()
+        proxy_port = int(os.environ.get("DOFUS_PROXY_PORT", "5555"))
+        upstream_host = os.environ.get(
+            "DOFUS_UPSTREAM_HOST", "play-hystoria.net"
+        ).strip()
+        upstream_port = int(os.environ.get("DOFUS_UPSTREAM_PORT", "5555"))
         script = os.environ.get("DOFUS_SCRIPT", "").strip() or None
         log_level = os.environ.get("DOFUS_LOG_LEVEL", "INFO").strip()
 
-        if not username or not password:
-            raise RuntimeError(
-                "DOFUS_USERNAME and DOFUS_PASSWORD must be set in .env"
-            )
-
         return cls(
-            username=username,
-            password=password,
-            character=character,
-            auth_host=auth_host,
-            auth_port=auth_port,
-            server_id=server_id,
+            proxy_host=proxy_host,
+            proxy_port=proxy_port,
+            upstream_host=upstream_host,
+            upstream_port=upstream_port,
             script=script,
             log_level=log_level,
         )
