@@ -89,7 +89,12 @@ def resolve_script_path(script_arg: str) -> Path:
     return inside
 
 
-async def run_proxy(config: DofusConfig, hook: bool = False, hook_target: str = "Dofus Retro.exe") -> None:
+async def run_proxy(
+    config: DofusConfig,
+    hook: bool = False,
+    hook_target: str = "Dofus Retro.exe",
+    dump_packets: bool = False,
+) -> None:
     state = GameState()
     event_bus = EventBus()
     client_router, server_router = build_routers(state, event_bus)
@@ -99,6 +104,7 @@ async def run_proxy(config: DofusConfig, hook: bool = False, hook_target: str = 
         listen_port=config.proxy_port,
         upstream_host=config.upstream_host,
         upstream_port=config.upstream_port,
+        dump_packets=dump_packets,
     )
     proxy.on_client_message(client_router.dispatch)
     proxy.on_server_message(server_router.dispatch)
@@ -188,6 +194,15 @@ def parse_args() -> argparse.Namespace:
         default="Dofus Retro.exe",
         help="Process name or PID for the Frida hook (default: 'Dofus Retro.exe').",
     )
+    parser.add_argument(
+        "--dump",
+        action="store_true",
+        help=(
+            "Dump every packet that transits through the proxy at INFO "
+            "level (truncated). Useful to inspect the wire protocol of "
+            "an unknown server."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -203,7 +218,12 @@ async def main_async() -> None:
         logger.error("No mode selected. Use --proxy.")
         return
 
-    await run_proxy(config, hook=args.hook, hook_target=args.hook_target)
+    await run_proxy(
+        config,
+        hook=args.hook,
+        hook_target=args.hook_target,
+        dump_packets=args.dump,
+    )
 
 
 def main() -> None:

@@ -41,17 +41,22 @@ MessageCallback = Callable[[str], Awaitable[None]]
 class DofusProxy:
     """Transparent TCP MITM proxy for the Dofus 1.29 text protocol."""
 
+    #: Maximum number of characters shown per packet in dump mode.
+    DUMP_TRUNCATE = 200
+
     def __init__(
         self,
         listen_host: str,
         listen_port: int,
         upstream_host: str,
         upstream_port: int,
+        dump_packets: bool = False,
     ) -> None:
         self.listen_host = listen_host
         self.listen_port = listen_port
         self.upstream_host = upstream_host
         self.upstream_port = upstream_port
+        self.dump_packets = dump_packets
 
         self._on_client_message: Optional[MessageCallback] = None
         self._on_server_message: Optional[MessageCallback] = None
@@ -236,7 +241,18 @@ class DofusProxy:
                             decoded = frag.decode(WIRE_ENCODING, errors="replace")
                         except Exception:
                             continue
-                        logger.debug("[%s] %s", label, decoded)
+                        if self.dump_packets:
+                            shown = decoded
+                            if len(shown) > self.DUMP_TRUNCATE:
+                                shown = (
+                                    shown[: self.DUMP_TRUNCATE]
+                                    + f"... [+{len(decoded) - self.DUMP_TRUNCATE} chars]"
+                                )
+                            # Replace control bytes so the terminal stays sane.
+                            shown = shown.replace("\r", "\\r").replace("\n", "\\n")
+                            logger.info("[%s] %s", label, shown)
+                        else:
+                            logger.debug("[%s] %s", label, decoded)
                         if callback is not None:
                             try:
                                 await callback(decoded)
