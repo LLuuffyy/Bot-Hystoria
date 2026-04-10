@@ -29,8 +29,19 @@ function ipToBytes(ip) {
 var realBytes  = ipToBytes(REAL_IP);
 var proxyBytes = ipToBytes(PROXY_IP);
 
-/* ws2_32.dll!connect(SOCKET s, const sockaddr *name, int namelen) */
-var pConnect = Module.getExportByName('ws2_32.dll', 'connect');
+/* ws2_32.dll!connect(SOCKET s, const sockaddr *name, int namelen)
+ *
+ * Frida 17 removed the module-level `Module.getExportByName(name, sym)`
+ * helper in favour of namespaced lookups on a Module instance.  Try
+ * the modern API first and fall back to the legacy one for older
+ * Frida releases. */
+var pConnect;
+try {
+    var ws2 = Process.getModuleByName('ws2_32.dll');
+    pConnect = ws2.getExportByName('connect');
+} catch (e) {
+    pConnect = Module.getExportByName('ws2_32.dll', 'connect');
+}
 
 Interceptor.attach(pConnect, {
     onEnter: function (args) {
