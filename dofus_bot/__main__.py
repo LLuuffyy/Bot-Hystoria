@@ -94,6 +94,7 @@ async def run_proxy(
     hook: bool = False,
     hook_target: str = "Dofus Retro.exe",
     dump_packets: bool = False,
+    hex_dump_path: Optional[Path] = None,
 ) -> None:
     state = GameState()
     event_bus = EventBus()
@@ -105,6 +106,7 @@ async def run_proxy(
         upstream_host=config.upstream_host,
         upstream_port=config.upstream_port,
         dump_packets=dump_packets,
+        hex_dump_path=hex_dump_path,
     )
     proxy.on_client_message(client_router.dispatch)
     proxy.on_server_message(server_router.dispatch)
@@ -203,6 +205,19 @@ def parse_args() -> argparse.Namespace:
             "an unknown server."
         ),
     )
+    parser.add_argument(
+        "--hex-dump",
+        dest="hex_dump",
+        type=str,
+        nargs="?",
+        const="logs/proxy_hex.log",
+        default=None,
+        help=(
+            "Write a raw hex dump of every byte read off the socket to "
+            "the given file (default: logs/proxy_hex.log). Ground-truth "
+            "diagnostic for when --dump output looks garbled."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -218,11 +233,16 @@ async def main_async() -> None:
         logger.error("No mode selected. Use --proxy.")
         return
 
+    hex_dump_path: Optional[Path] = None
+    if args.hex_dump is not None:
+        hex_dump_path = Path(args.hex_dump).expanduser()
+
     await run_proxy(
         config,
         hook=args.hook,
         hook_target=args.hook_target,
         dump_packets=args.dump,
+        hex_dump_path=hex_dump_path,
     )
 
 

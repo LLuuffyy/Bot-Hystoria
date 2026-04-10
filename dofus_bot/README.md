@@ -20,6 +20,7 @@ les paquets reseau pour automatiser ce que tu veux via des scripts Lua.
 
 - [x] Proxy MITM TCP (`network/proxy.py`)
 - [x] Framing \\x00 + decodage latin-1
+- [x] Strip de la signature Shield `\xf9...\xf9` avant dispatch (`protocol/shield.py`)
 - [x] Routeur de messages par prefixe
 - [x] Parsers de base : entree de map (`GDM`), acteurs (`GM`), combat (`GJK`/`GTS`/`GTM`/`GTE`/`GE`)
 - [x] Mode `--proxy` : lance le proxy et log tout le trafic
@@ -31,6 +32,8 @@ les paquets reseau pour automatiser ce que tu veux via des scripts Lua.
 - [x] Pathfinding A* sur grille losange + encodage du path
 - [x] Injection de deplacement (`GA0;1;charId;encodedPath`) via `bot:move_to`
 - [x] Suivi des walks (GA0) : met a jour la cell des acteurs et emet `character_moved`
+- [ ] **Signature Shield des paquets injectes** (bloquant pour que `bot:cast`/`bot:move_to`
+      soient acceptes par le serveur Hystoria — voir section "Shield" plus bas)
 - [ ] Moteur de rotation de sorts declaratif (turns[1] = {...}, turns[2] = {...})
 - [ ] Auto-heal hors combat (utilisation d'items)
 - [ ] Pathfinding multi-maps (WorldGraph)
@@ -288,6 +291,70 @@ bot:on("character_moved",  function(data) ... end)  -- data.from, data.to, data.
 Le moteur surveille le `mtime` du fichier source toutes les secondes.
 Quand tu sauvegardes ton script, il est recharge automatiquement sans
 couper la session du client. Pratique pour iterer.
+
+## Shield (anti-cheat Ankama)
+
+Le client Hystoria V5 est base sur l'Electron de Dofus Retro 1.48 qui
+embarque un module d'anti-cheat appele **Shield** (dans `main.jsc`).
+Shield **signe** chaque paquet sortant avec une chaine AES-256-CBC en
+4 etapes. Point crucial : Shield ne **chiffre pas** le corps du
+paquet, il ajoute juste une signature en suffixe :
+
+```
+<raw_packet>\xf9<base64_iv>\xf9<base64_ct>\xf9
+```
+
+Le prefixe Dofus 1.29 habituel (`GDM`, `GA`, `GTS`, ...) reste lisible
+directement avant le premier `\xf9`.
+
+### Cote lecture (fait)
+
+Le proxy appelle `protocol.shield.strip_shield_signature()` sur chaque
+fragment avant de le passer au routeur. Si le paquet n'a pas de
+signature (ex. ACK, chat, pre-login), le stripper est un no-op. La
+premiere fois qu'une signature est detectee, tu verras dans la console :
+
+```
+[C>>S] Shield signature detected (stripped 304 bytes, payload=16 bytes).
+       Readable mode engaged.
+```
+
+En mode `--dump`, chaque ligne est taguee avec la taille de la
+signature strippee, ex. `[C>>S] +shield(304) GA0;1;1234;abcd...`.
+
+### Cote injection (TODO)
+
+Pour que `bot:move_to(...)` et `bot:cast(...)` fonctionnent contre
+Hystoria, chaque paquet qu'on injecte doit porter une signature Shield
+valide. Les deux approches possibles :
+
+1. **Reverse du module Shield** pour en extraire les cles AES et
+   reimplementer `applyPacketToSendPostProcessing` en Python. Base de
+   travail : [xkenzzo31/dofus-retro-deobfuscator](https://github.com/xkenzzo31/dofus-retro-deobfuscator)
+   et `/tmp/dofus-deob/DOCS.md`.
+2. **Oracle Frida** : hook `applyPacketToSendPostProcessing` dans le
+   processus Electron et l'utiliser comme service de signature via IPC
+   (named pipe / socket local). Plus rapide a mettre en place mais
+   expose au scan anti-debug Shield (detection du nom de processus Frida).
+
+Tant que cette piece n'est pas en place, les scripts Lua peuvent lire
+l'etat du jeu et reagir aux evenements, mais les appels d'action
+(`bot:cast`, `bot:move_to`, `bot:engage`) seront rejetes par le serveur
+car leur paquet arrivera sans signature.
+
+### Hex dump de diagnostic
+
+Si le mode `--dump` affiche des messages illisibles (ni texte clair, ni
+shield clair), lance le proxy avec `--hex-dump` pour ecrire un dump
+hexa des bytes bruts :
+
+```
+python -m dofus_bot --proxy --hex-dump logs/proxy_hex.log
+```
+
+Ca te donne la verite terrain : chaque chunk lu sur la socket est
+ecrit tel quel, avant framing et stripping, pour pouvoir comparer avec
+ce qu'attend le format documente.
 
 ### Sandbox
 

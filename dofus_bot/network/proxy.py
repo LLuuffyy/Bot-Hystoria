@@ -29,8 +29,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
+from ..protocol.shield import strip_shield_signature
 from .connection import MESSAGE_TERMINATOR, WIRE_ENCODING, _split_newlines
 
 logger = logging.getLogger(__name__)
@@ -51,12 +53,14 @@ class DofusProxy:
         upstream_host: str,
         upstream_port: int,
         dump_packets: bool = False,
+        hex_dump_path: Optional[Path] = None,
     ) -> None:
         self.listen_host = listen_host
         self.listen_port = listen_port
         self.upstream_host = upstream_host
         self.upstream_port = upstream_port
         self.dump_packets = dump_packets
+        self.hex_dump_path = hex_dump_path
 
         self._on_client_message: Optional[MessageCallback] = None
         self._on_server_message: Optional[MessageCallback] = None
@@ -64,6 +68,8 @@ class DofusProxy:
         self._client_writer: Optional[asyncio.StreamWriter] = None
         self._server_writer: Optional[asyncio.StreamWriter] = None
         self._server: Optional[asyncio.base_events.Server] = None
+        self._hex_file = None  # Opened lazily on first write.
+        self._shield_warned = False
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -127,6 +133,50 @@ class DofusProxy:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
+        if self._hex_file is not None:
+            try:
+                self._hex_file.close()
+            except Exception:
+                pass
+            self._hex_file = None
+
+    # ------------------------------------------------------------------ #
+    # Hex dump helpers (diagnostic, off by default)
+    # ------------------------------------------------------------------ #
+
+    def _write_hex_dump(self, label: str, data: bytes) -> None:
+        """Append a hex dump of ``data`` to the configured hex file.
+
+        This is the ground-truth view: we write the raw bytes we just
+        pulled off the socket, before any framing or shield stripping,
+        so we can diagnose when the parsed output doesn't match
+        expectations (wrong encoding, missing framing, unknown crypto).
+        """
+        if self.hex_dump_path is None:
+            return
+        if self._hex_file is None:
+            try:
+                self.hex_dump_path.parent.mkdir(parents=True, exist_ok=True)
+                self._hex_file = open(self.hex_dump_path, "a", encoding="utf-8")
+            except OSError as exc:
+                logger.warning("Cannot open hex dump file %s: %s",
+                               self.hex_dump_path, exc)
+                self.hex_dump_path = None
+                return
+        try:
+            self._hex_file.write(f"--- [{label}] {len(data)} bytes ---\n")
+            for i in range(0, len(data), 16):
+                chunk = data[i : i + 16]
+                hex_part = " ".join(f"{b:02x}" for b in chunk)
+                ascii_part = "".join(
+                    chr(b) if 0x20 <= b < 0x7F else "." for b in chunk
+                )
+                self._hex_file.write(
+                    f"{i:06x}  {hex_part:<47}  {ascii_part}\n"
+                )
+            self._hex_file.flush()
+        except OSError as exc:
+            logger.warning("Hex dump write failed: %s", exc)
 
     # ------------------------------------------------------------------ #
     # Internal plumbing
@@ -203,14 +253,16 @@ class DofusProxy:
         """Forward one direction of the TCP stream, framing on \\x00.
 
         Each framed message is:
-        1. Logged at DEBUG.
-        2. Passed to the callback (which may update state or ignore it).
-        3. Forwarded to the destination AS-IS.
+        1. Shield-signature stripped (if present).
+        2. Logged at DEBUG (or INFO in --dump mode).
+        3. Passed to the callback (which may update state or ignore it).
+        4. Forwarded to the destination AS-IS.
 
         The forwarded bytes are the original bytes, not a re-serialised
         version of the parsed message: this avoids any accidental
         corruption if our parser disagrees with the server about a
-        field's encoding.
+        field's encoding, and it preserves the Shield signature so the
+        other end still accepts the packet.
         """
         buffer = bytearray()
         try:
@@ -228,6 +280,10 @@ class DofusProxy:
                     logger.debug("[%s] destination closed: %s", label, exc)
                     return
 
+                # Ground-truth hex dump of every byte pulled off the wire.
+                # Only enabled when the proxy was built with a hex_dump_path.
+                self._write_hex_dump(label, chunk)
+
                 # Then parse the stream for our own visibility.
                 buffer.extend(chunk)
                 while True:
@@ -237,10 +293,31 @@ class DofusProxy:
                     raw = bytes(buffer[:idx])
                     del buffer[: idx + 1]
                     for frag in _split_newlines(raw):
+                        if not frag:
+                            continue
+
+                        # Strip the Shield signature suffix (if any). The
+                        # raw packet body is preserved at the front; only
+                        # the trailing \xf9...base64...\xf9 block is cut.
+                        payload, signature = strip_shield_signature(frag)
+
+                        # First time we see a signature, tell the user.
+                        if signature is not None and not self._shield_warned:
+                            self._shield_warned = True
+                            logger.info(
+                                "[%s] Shield signature detected "
+                                "(stripped %d bytes, payload=%d bytes). "
+                                "Readable mode engaged.",
+                                label, len(signature), len(payload),
+                            )
+
                         try:
-                            decoded = frag.decode(WIRE_ENCODING, errors="replace")
+                            decoded = payload.decode(
+                                WIRE_ENCODING, errors="replace"
+                            )
                         except Exception:
                             continue
+
                         if self.dump_packets:
                             shown = decoded
                             if len(shown) > self.DUMP_TRUNCATE:
@@ -250,9 +327,15 @@ class DofusProxy:
                                 )
                             # Replace control bytes so the terminal stays sane.
                             shown = shown.replace("\r", "\\r").replace("\n", "\\n")
-                            logger.info("[%s] %s", label, shown)
+                            sig_tag = (
+                                f" +shield({len(signature)})"
+                                if signature is not None
+                                else ""
+                            )
+                            logger.info("[%s]%s %s", label, sig_tag, shown)
                         else:
                             logger.debug("[%s] %s", label, decoded)
+
                         if callback is not None:
                             try:
                                 await callback(decoded)
