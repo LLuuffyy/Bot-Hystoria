@@ -6,3 +6,4 @@ playwright-stealth>=2.0.0
 pyyaml>=6.0
 lupa>=2.0
 frida>=16.0
+cryptography>=42.0  # AES-256-CBC for Shield packet signing

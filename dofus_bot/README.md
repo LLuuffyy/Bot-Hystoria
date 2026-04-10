@@ -322,25 +322,94 @@ premiere fois qu'une signature est detectee, tu verras dans la console :
 En mode `--dump`, chaque ligne est taguee avec la taille de la
 signature strippee, ex. `[C>>S] +shield(304) GA0;1;1234;abcd...`.
 
-### Cote injection (TODO)
+### Cote injection (en cours)
 
-Pour que `bot:move_to(...)` et `bot:cast(...)` fonctionnent contre
-Hystoria, chaque paquet qu'on injecte doit porter une signature Shield
-valide. Les deux approches possibles :
+Le module `protocol/shield_signer.py` implemente la chaine
+AES-256-CBC complete decrite dans
+[xkenzzo31/dofus-retro-deobfuscator](https://github.com/xkenzzo31/dofus-retro-deobfuscator) :
 
-1. **Reverse du module Shield** pour en extraire les cles AES et
-   reimplementer `applyPacketToSendPostProcessing` en Python. Base de
-   travail : [xkenzzo31/dofus-retro-deobfuscator](https://github.com/xkenzzo31/dofus-retro-deobfuscator)
-   et `/tmp/dofus-deob/DOCS.md`.
-2. **Oracle Frida** : hook `applyPacketToSendPostProcessing` dans le
-   processus Electron et l'utiliser comme service de signature via IPC
-   (named pipe / socket local). Plus rapide a mettre en place mais
-   expose au scan anti-debug Shield (detection du nom de processus Frida).
+```
+counter_str = format(counter, "05d")
+hash        = SHA256(raw_packet + counter_str)
+ct1         = AES-256-CBC(hash, key=hash_array[k1], iv=static_iv)
+ct2         = AES-256-CBC(ct1,  key=hash_array[k2], iv=static_iv)
+iv_rand     = os.urandom(16)
+ct3         = AES-256-CBC(ct2,  key=wrap_key,      iv=iv_rand)
+output      = raw_packet + \xf9 + b64(iv_rand) + \xf9 + b64(ct3) + \xf9
+```
 
-Tant que cette piece n'est pas en place, les scripts Lua peuvent lire
-l'etat du jeu et reagir aux evenements, mais les appels d'action
-(`bot:cast`, `bot:move_to`, `bot:engage`) seront rejetes par le serveur
-car leur paquet arrivera sans signature.
+Le code est deja la, teste (22 unit tests sur la forme et la
+determinisme), **mais il a besoin des vraies cles**. Les cles
+(9 cles AES-256 dans `hash_array`, 1-2 wrap keys, IV statique) ne sont
+stockees nulle part dans le repo public : il faut les extraire **une
+fois** d'un client Dofus Retro 1.48 en cours d'execution, puis les
+ecrire dans `dofus_bot/data/shield_keys.json` (fichier gitignored).
+
+#### Recette d'extraction (Chrome DevTools sur Electron)
+
+1. **Fermer** Dofus Retro.exe s'il est lance.
+
+2. Lancer Dofus en mode debug Node.js :
+   ```
+   "C:\Users\touki\Desktop\Client Hystoria V5\Dofus Retro.exe" --inspect-brk=0.0.0.0:9229
+   ```
+   L'executable va s'arreter avant de charger `main.jsc` et ecouter
+   sur le port 9229.
+
+3. Ouvrir Chrome/Edge, aller sur `chrome://inspect`. Cliquer
+   "Configure..." et ajouter `localhost:9229` si ce n'est pas deja
+   la. Attendre que le target "node" apparaisse sous "Remote Target"
+   puis cliquer "inspect". DevTools s'ouvre, arrete sur le premier
+   statement.
+
+4. Dans l'onglet "Sources", chercher (Ctrl+P) le fichier qui contient
+   `applyPacketToSendPostProcessing`. Meme si le nom de fonction est
+   obfuscated, la chaine est presente dans les litteraux — Ctrl+Shift+F
+   dans tous les fichiers marche bien. Poser un breakpoint sur la
+   premiere ligne de la fonction.
+
+5. Reprendre l'execution (F8). Le client continue de demarrer. Des que
+   le premier paquet partant tombe dans le breakpoint, inspecter le
+   panel "Scope" a droite :
+   - "Local" : le `packet` recu
+   - "Closure" : c'est la que vivent `hash_array`, `wrap_key`, et le
+     `static_iv`. Survoler chaque entree pour voir son type. Les cles
+     apparaissent comme `Uint8Array(32)` ou `CryptoJS.lib.WordArray`
+     selon le build.
+
+6. Exporter chaque cle en hex via la console DevTools :
+   ```js
+   // Si c'est un Uint8Array :
+   Array.from(hash_array[0]).map(b => b.toString(16).padStart(2, '0')).join('')
+
+   // Si c'est une CryptoJS WordArray :
+   hash_array[0].toString(CryptoJS.enc.Hex)
+   ```
+   Collecter les 9 valeurs de `hash_array`, le `wrap_key`, et le
+   `static_iv` (16 bytes = 32 hex chars).
+
+7. Copier `dofus_bot/data/shield_keys.example.json` vers
+   `dofus_bot/data/shield_keys.json` et remplacer les valeurs
+   d'exemple par les vraies cles.
+
+8. Valider le chargement :
+   ```
+   python -c "from dofus_bot.protocol.shield_signer import ShieldKeys; from pathlib import Path; ShieldKeys.from_json(Path('dofus_bot/data/shield_keys.json')); print('OK')"
+   ```
+
+Une fois les cles en place, la variable d'environnement
+`DOFUS_SHIELD_KEYS=dofus_bot/data/shield_keys.json` dans `.env` suffit
+pour activer le signer. Tant que cette variable n'est pas definie, la
+proxy tourne en mode lecture seule et les injections du script Lua
+sont logguees mais non envoyees.
+
+#### Validation contre des vecteurs reels
+
+Une fois les cles en main, on peut les valider contre les 639 paires
+input/output capturees dans
+[`data/security_api_calls.json`](https://github.com/xkenzzo31/dofus-retro-deobfuscator/blob/main/data/security_api_calls.json)
+du repo xkenzzo31. Un script `tools/validate_shield_signer.py` sera
+ajoute pour faire ce round-trip automatiquement.
 
 ### Hex dump de diagnostic
 

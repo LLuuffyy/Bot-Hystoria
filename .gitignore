@@ -16,6 +16,8 @@ logs/
 # dofus_bot
 dofus_bot/data/maps/cache/
 dofus_bot/data/scripts/my_scripts/
+# Real Shield keys — NEVER commit, only the .example.json template is tracked
+dofus_bot/data/shield_keys.json
 
 # IDE
 .vscode/

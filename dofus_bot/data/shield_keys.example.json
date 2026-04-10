@@ -1,0 +1,27 @@
+{
+  "_comment": "Shield signing keys for Dofus Retro 1.48 / Hystoria V5. This is a TEMPLATE with dummy values — copy to shield_keys.json and replace with the real keys extracted from a live client. See dofus_bot/README.md section 'Shield' for the extraction recipe.",
+
+  "_hash_array_comment": "The 9 AES-256 keys (hex, 64 chars each) that live in the closure around Shield.applyPacketToSendPostProcessing in main.jsc. Order matters — use the order the client's Shield.init() populates them. If you only have 2 keys you can omit the others, but the signer will reject slot_k1 / slot_k2 pointing past the end.",
+  "hash_array": [
+    "00000000000000000000000000000000000000000000000000000000deadbe01",
+    "00000000000000000000000000000000000000000000000000000000feedba02",
+    "0000000000000000000000000000000000000000000000000000000000000003",
+    "0000000000000000000000000000000000000000000000000000000000000004",
+    "0000000000000000000000000000000000000000000000000000000000000005",
+    "0000000000000000000000000000000000000000000000000000000000000006",
+    "0000000000000000000000000000000000000000000000000000000000000007",
+    "0000000000000000000000000000000000000000000000000000000000000008",
+    "0000000000000000000000000000000000000000000000000000000000000009"
+  ],
+
+  "_wrap_key_comment": "The outer AES-256 key used in step 4 of the signing flow. DOCS.md mentions '2 wrap keys' in some builds — put the primary here and the alternate in wrap_key_alt (set to null if you only have one).",
+  "wrap_key": "0000000000000000000000000000000000000000000000000000000000000042",
+  "wrap_key_alt": null,
+
+  "_static_iv_comment": "The constant 16-byte IV used in steps 2 and 3 (inner AES rounds). Derived at Shield.init() time from the hash chain, stays fixed for the session.",
+  "static_iv": "000102030405060708090a0b0c0d0e0f",
+
+  "_slots_comment": "Which hash_array index to use for k1 (step 2) and k2 (step 3). Default (0, 1) matches the common pattern but may differ per build — verify against captures in data/security_api_calls.json from xkenzzo31/dofus-retro-deobfuscator.",
+  "slot_k1": 0,
+  "slot_k2": 1
+}
