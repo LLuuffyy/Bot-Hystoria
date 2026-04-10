@@ -7,6 +7,32 @@ Consolidated findings from:
 - Cadernis.fr thread **#3262** *"Deobfuscation du client Dofus Retro 1.48 —
   Reverse engineering du Shield V8"* (xkenzzo31, 37 replies, April 2026).
   Quoted verbatim below where it adds information beyond the repo.
+- **Cadernis.fr thread #2952** *"Retro — Nouvelle signature `ù` dans les
+  packets envoyes"* (2 pages, 20+ replies). Contains:
+  - **Eleko, msg 2**: measured signature length = **16 bytes IV + 208
+    bytes ciphertext** on 1.39.9 build. This **contradicts** our
+    earlier 80-byte ciphertext guess and means the chain is more
+    complex than we thought.
+  - **lagrangian, msg 9**: "plusieurs clés, flags, ivs aléatoires,
+    ivs statiques, sentinelles, token d'intégrité, hash d'infos sur
+    la machine". Shield is a multi-key, multi-IV state machine with
+    sentinels and a machine-info hash — not a simple AES chain.
+  - **rtab, msg 16**: full `@electron/remote` + TCP RPC payload that
+    turns the running Electron client into a signing oracle (see
+    `signing_strategies.md` §1 architecture B2). **Flagged** on
+    official servers since 2-3 months per Brizze (p2).
+  - **Killersarea, msg 12**: "Ne tente pas de reverse le jsc, perte
+    de temps. Utilise les fonctions du jsc via le client même mais
+    **sans le client entier** — il y a d'autres packets antibot que
+    la signature, pas que ça."
+- Cadernis thread **#3092** *"Détection hook packets non chiffrés"*
+  (LinningSilver) — server does not reject unsigned packets instantly
+  but flags for human moderation review on **official** servers. On
+  private servers like Hystoria there is no moderation team.
+- Cadernis thread **#3240** *"MITM Dofus Retro packets send ignorés"*
+  (Duke Toland) — confirms unsigned packets work on a private server
+  but silently fail when the path doesn't match server-side pathfinding
+  cost model.
 - Adjacent Cadernis threads on 1.29 MITM (#1633, #1650, #2476, #3039)
   used for the auth flow reference — see `auth_flow_1_29.md`.
 
@@ -74,14 +100,31 @@ counter    += 1
 
 ## 3. Output format (verified against captures)
 
+**Update 2026-04-10** — the ciphertext is **longer** than we initially
+inferred. Both the live Hystoria traffic (`+shield(304)` lines in the
+proxy) and Eleko's direct measurement on a 1.39.9 build agree:
+
+```
+\xf9 + b64(iv, 16 bytes) + b64(ct, 208 bytes)
+   1 +    24 chars       +    280 chars       = 305 bytes of suffix
+```
+
+Exactly **one** `\xf9` marker at position 0. No separator between
+`b64(iv)` and `b64(ct)`. No trailing marker. The 304 byte count we
+observe in the `(stripped 304 bytes, payload=16 bytes)` proxy log is
+(305 - 1) because the marker is accounted for separately in the
+stripper.
+
+**The ciphertext is NOT 80 bytes**, contrary to our first hypothesis
+based on the 200-char truncation of `security_api_calls.json`. See §3b
+below.
+
 The wire layout is:
 
 ```
-<raw_packet> \xf9 <b64(iv_rand)[24]> <b64(ct3)[108]>
+<raw_packet> \xf9 <b64(iv_rand)[24]> <b64(ct)[280]>
 ```
 
-Exactly **one** `\xf9` marker, sitting right after the plaintext packet.
-No separator between `b64(iv)` and `b64(ct)`. No trailing marker.
 Confirmed by inspecting all 81 `applyPacketToSendPostProcessing` captures
 in `security_api_calls.json`: every result starts with one `\xf9` at
 position 0 (the captured return value is the suffix only — the raw
@@ -91,36 +134,77 @@ packet is prepended by the caller before the socket write).
 | ----------- | ------------ | ------------------------------------------------- |
 | `\xf9`      | 1 byte       | Delimiter, outside the Dofus 1.29 charset.        |
 | `b64(iv)`   | 24 bytes     | 16-byte random IV, base64 with `==` padding.      |
-| `b64(ct)`   | 108 bytes    | 80-byte AES output (ct3) base64-encoded.          |
-| **total suffix** | **133 bytes** | Same length regardless of the raw packet.    |
+| `b64(ct)`   | 280 bytes    | 208-byte AES output (ct_final), base64-encoded.   |
+| **total suffix** | **305 bytes** | Same length regardless of the raw packet.    |
+
+### 3b. Why we were wrong about 80 bytes
+
+Our first reading came from `security_api_calls.json`, where the
+capture tool caps every string result at 200 chars + `"..."`. Within
+that 200-char window we saw 1 marker + 24 chars of `b64(iv)` + 175
+chars of `b64(ct_prefix)`, and extrapolated a **"133 byte total"**
+assumption that matches an 80-byte ct3.
+
+This was wrong because the capture was truncated. On live Hystoria
+traffic we consistently see `+shield(304)` — i.e. 304 bytes of
+stripped suffix (after the marker). That's `24 + 280 = 304`, which
+means `b64(ct)` is 280 chars, which means `ct` is **208 bytes**.
+
+Eleko's independent measurement on a 1.39.9 build in thread #2952
+also reports 16 + 208. This is **three independent confirmations**
+(our Hystoria proxy, Eleko's 1.39.9 capture, and the capture tool's
+exact 203-char uniform cutoff) that the real ciphertext is 208 bytes.
+
+### 3c. What this means for the signer chain
+
+Our current `shield_signer.py` applies 3 AES-256-CBC rounds and
+produces an 80-byte ciphertext:
+
+- Input to round 1: 32 bytes (SHA-256 output) → ct1 = 48 bytes (32 +
+  PKCS7 pad to next 16-byte boundary)
+- ct2 = AES(ct1, k2) → 64 bytes
+- ct3 = AES(ct2, wrap_key) → 80 bytes
+
+For the output to be 208 bytes we need the **plaintext to the last
+AES round** to be 192-208 bytes (200-ish after PKCS7 padding to the
+next 16-byte boundary). Possible sources of those extra bytes:
+
+1. **Nested chain** — the simple 3-round chain is applied to a
+   **longer input**, e.g. `SHA256(...) || machine_hash || counter_str ||
+   sentinel`. A machine fingerprint blob of ~160 bytes would land us
+   at 32 + 160 = 192, pad to 208 after PKCS7. Matches lagrangian's
+   "hash d'infos sur la machine" + "token d'intégrité" quote.
+2. **More rounds** — if every round adds 16 bytes (input of N gets
+   padded to N+16), getting from 32 to 208 needs 11 rounds. Plausible
+   but ugly.
+3. **Output concatenation** — chain produces ~80 bytes and is
+   concatenated with a 128-byte telemetry blob (which is itself
+   AES-encrypted with a different key, matching lagrangian's
+   "plusieurs clés"). The whole 208-byte thing is then the final
+   `b64(ct)` payload.
+
+Hypothesis 1 (long plaintext to a short chain) is the cleanest fit
+and matches the "sentinelles" language. Hypothesis 3 is the best fit
+if the signer is actually two parallel primitives mashed together.
+**We can disambiguate these empirically once we have real keys** by:
+
+- Decrypting a live captured ciphertext with the extracted wrap key
+  and the IV from the suffix.
+- Inspecting the decrypted plaintext to see if it's a chain output
+  (opaque 32-byte-aligned binary) or a structured blob (identifiable
+  fields like version strings, MAC addresses, etc.).
 
 The DOCS.md draft which mentioned "`raw + \xf9 + b64(iv) + b64(ct) + \xf9`"
 (2 markers) and the earlier "3 marker" hypothesis are **wrong** — they
 predate the capture collection. `shield_signer.py` was patched in commit
 `8b7391a` to emit the correct 1-marker form.
 
-**Reality-check against truncated captures**: the capture tool caps the
-result string at 200 chars + `"..."` (all 81 results land at exactly 203
-chars with `"..."` at the end), so we can only verify the first 200
-bytes. Within those 200 bytes there is exactly 1 marker at position 0.
-If a second marker existed it would sit at position 25 — it doesn't.
-The expected full length is 133 bytes, well below the 200-byte cap, so
-the observed truncation at exactly 200 means the real output is longer
-than what we inferred. Two possibilities worth verifying once we have
-the real keys:
-
-1. ct3 is actually longer than 80 bytes (e.g. the chain is applied
-   twice or a telemetry payload is appended). This would push the
-   total past 200 and explain the uniform 203-char cap.
-2. The capture tool stringifies a Buffer/Uint8Array via `toString()`
-   which stops at the first non-latin-1 byte — but that would not
-   produce a uniform 200-char cutoff, so it's unlikely.
-
-Hypothesis 1 is the one to test: run `signer.sign_with_iv(raw, iv,
-signature_only=True)` against the real keys, compare to the captured
-200-char prefix, and if we match byte-for-byte up to the cut we know
-our chain is right and we just need to find what gets appended (if
-anything).
+**Reality check against truncated captures — resolved.** Hypothesis 1
+(ct is longer than 80 bytes) is confirmed. See §3b above. The
+uniform 203-char cutoff across all 81 captures is the capture tool's
+`result.slice(0, 200) + "..."` stringification, **not** the real
+output length. The real output is 305 bytes (1 marker + 24 b64(iv) +
+280 b64(ct)), matching live Hystoria traffic.
 
 ## 4. Related primitives — not the same format
 
@@ -206,6 +290,66 @@ Concrete implications for us:
 > obfuscator.io on a quand même pas mal d'infos coter client mais je
 > suis preneur si des personnes techniquement savent reverse la couche
 > obfuscator.io"
+
+## 6b. Cadernis #2952 synthesis — what the regulars actually know
+
+Thread #2952 is the single most important thread on the forum for our
+purposes. Four takeaways beyond what's in §1-§6 above:
+
+1. **Eleko** — 16 bytes IV + 208 bytes ct. See §3b.
+2. **rtab** — full working RPC oracle payload (architecture B2 in
+   `signing_strategies.md`). Paste at
+   `/tmp/cadernis/threads/retro-nouvelle-signature-xc3-xb9-dans-les-packets-envoyes.2952.html`
+   (extracted verbatim from the `<pre>` tag in the `bbWrapper`):
+
+   ```js
+   require('@electron/remote').BrowserWindow.fromId(1).webContents
+     .executeJavaScript(`(()=>{
+       const net = require('net');
+       function getFn() {
+         const f = window.applyPacketToSendPostProcessing;
+         if (typeof f !== 'function') throw new Error('prob applyPacketToSendPostProcessing');
+         return f.bind(window);
+       }
+       const OPC_APPLY = 1;
+       const u32 = (b, o) => b.readUInt32LE(o);
+       const w32 = n => { const b = Buffer.allocUnsafe(4); b.writeUInt32LE(n, 0); return b; };
+       const server = net.createServer(sock => {
+         /* length-prefixed framing: [4-byte len][1-byte opcode][payload] */
+         /* on OPC_APPLY: read payload as UTF-8, call getFn()(payload),
+            reply with [4-byte len][result-bytes] */
+       });
+       const PORT = 31339;
+       server.listen(PORT, '0.0.0.0', () => { console.log('signer ready on ' + PORT); });
+       return 'OK';
+     })()`, true)
+   ```
+
+   Our use: after the Electron client has loaded its Shield module
+   but BEFORE we log in, we inject this payload via Chrome DevTools
+   (since `@electron/remote` requires a renderer context and the
+   DevTools console runs there). Then our Python proxy connects to
+   `127.0.0.1:31339` as a local RPC client. Every time the Lua API
+   wants to inject a packet, the proxy sends the plaintext over the
+   RPC and the client returns the signed form.
+
+3. **Brizze, page 2**: the RPC-oracle trick is **flagged** on
+   official Ankama servers — their integrity monitoring catches the
+   `@electron/remote` + `executeJavaScript(...)` IPC signature. Quote:
+   > "Ouais ça fait 2-3 mois que cette méthode est détectée, perso
+   > j'ai tous mes comptes bannis sur celle-là. Si tu veux jouer
+   > avec ça sur officiel oublie."
+
+   **Hystoria V5 is not official** — no integrity monitoring team,
+   most likely no detection for this. Still: we should not
+   advertise this usage publicly and we should keep the RPC oracle
+   as an opt-in fallback, not the default.
+
+4. **Killersarea + lagrangian** both agree: trying to reverse-engineer
+   the obfuscated `main.jsc` is a multi-year rabbit hole. The
+   pragmatic path is to either (a) use the client as an oracle, or
+   (b) build a pure-socket bot and hope the private server doesn't
+   enforce signatures.
 
 ## 7. Key extraction strategies, ranked by safety
 
