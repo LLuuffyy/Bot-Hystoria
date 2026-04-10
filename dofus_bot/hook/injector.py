@@ -5,18 +5,26 @@ proxy.
 Can be used standalone::
 
     python -m dofus_bot.hook --target "Dofus Retro.exe"
+    python -m dofus_bot.hook --target 12345      # attach by PID
 
 Or imported and called from the main proxy launcher.
+
+Electron apps like the Hystoria V5 client spawn *several* processes
+with the same executable name (main, GPU, renderer, Flash plugin, ...).
+The TCP connection to the game server is made from whichever process
+hosts the pepperflash plugin, so this module attaches the hook to
+**every** matching process.  Only the one that actually calls
+``connect(162.19.127.155:5555)`` will trigger the rewrite; the others
+remain silent.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 import sys
 import threading
 from pathlib import Path
-from typing import Optional
+from typing import List
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +48,25 @@ def _prepare_script(
     )
 
 
+def _resolve_targets(frida_mod, target: str) -> List[int]:
+    """Turn *target* into a list of PIDs to attach to.
+
+    - If *target* is purely numeric, it is treated as a PID.
+    - Otherwise, all running processes whose name matches *target*
+      (case-insensitive) are returned.
+    """
+    target_stripped = target.strip()
+    if target_stripped.isdigit():
+        return [int(target_stripped)]
+
+    matches: List[int] = []
+    wanted = target_stripped.lower()
+    for proc in frida_mod.enumerate_processes():
+        if proc.name.lower() == wanted:
+            matches.append(proc.pid)
+    return matches
+
+
 def attach(
     target: str = "Dofus Retro.exe",
     real_ip: str = "162.19.127.155",
@@ -50,7 +77,9 @@ def attach(
     """Attach to *target* and install the redirect hook.
 
     Blocks the calling thread until the Frida session ends (process
-    exits or user presses Ctrl-C).
+    exits or user presses Ctrl-C).  When *target* is a process name,
+    the hook is installed in every matching process (Electron apps
+    typically spawn 4+ of them).
     """
     try:
         import frida  # type: ignore[import-untyped]
@@ -68,22 +97,52 @@ def attach(
         elif message["type"] == "error":
             logger.error("Frida error: %s", message.get("stack", message))
 
-    logger.info("Attaching Frida to '%s' ...", target)
-    try:
-        session = frida.attach(target)
-    except frida.ProcessNotFoundError:
+    pids = _resolve_targets(frida, target)
+    if not pids:
         logger.error(
-            "Process '%s' not found.  Launch Dofus first, then run the hook.",
+            "No process matching '%s' found.  Launch Dofus first, then run the hook.",
             target,
         )
         raise SystemExit(1)
 
-    script = session.create_script(js_code)
-    script.on("message", on_message)
-    script.load()
     logger.info(
-        "Hook installed.  connect() calls to %s:%d will be "
+        "Found %d process(es) matching '%s': %s",
+        len(pids),
+        target,
+        ", ".join(str(p) for p in pids),
+    )
+
+    sessions = []
+    scripts = []
+    for pid in pids:
+        try:
+            session = frida.attach(pid)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not attach to PID %d: %s", pid, exc)
+            continue
+        try:
+            script = session.create_script(js_code)
+            script.on("message", on_message)
+            script.load()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not load script in PID %d: %s", pid, exc)
+            try:
+                session.detach()
+            except Exception:
+                pass
+            continue
+        sessions.append(session)
+        scripts.append(script)
+        logger.info("Hook installed in PID %d", pid)
+
+    if not sessions:
+        logger.error("Failed to install the hook in any process.  Aborting.")
+        raise SystemExit(1)
+
+    logger.info(
+        "Hook installed in %d process(es).  connect() calls to %s:%d will be "
         "redirected to %s:%d.",
+        len(sessions),
         real_ip,
         real_port,
         proxy_ip,
@@ -92,13 +151,23 @@ def attach(
     logger.info("Press Ctrl+C to detach.")
 
     try:
+        # Block forever until Ctrl-C or the Dofus process exits.
+        # We read from stdin so the user can just close the window.
         sys.stdin.read()
     except KeyboardInterrupt:
         pass
     finally:
-        script.unload()
-        session.detach()
-        logger.info("Frida detached.")
+        for script in scripts:
+            try:
+                script.unload()
+            except Exception:
+                pass
+        for session in sessions:
+            try:
+                session.detach()
+            except Exception:
+                pass
+        logger.info("Frida detached from %d process(es).", len(sessions))
 
 
 def attach_background(
