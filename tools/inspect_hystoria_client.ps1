@@ -6,7 +6,7 @@
 # -----------------------------------------------------------------
 
 param(
-    [string]$ClientPath = "C:\Users\touki\Downloads\Client Hystoria V5"
+    [string]$ClientPath = "C:\Users\touki\Desktop\Client Hystoria V5"
 )
 
 $ErrorActionPreference = "Continue"
@@ -110,6 +110,12 @@ Dump-FileContent "zaap.yml" (Join-Path $ClientPath "zaap.yml")
 Dump-FileContent ".release.infos.json" (Join-Path $ClientPath ".release.infos.json")
 Dump-FileContent "manifest.json" (Join-Path $ClientPath "manifest.json")
 
+# === 2b. Small text files at root that may contain session/auth data ===
+Dump-FileContent "login.txt" (Join-Path $ClientPath "login.txt")
+Dump-FileContent "session.txt" (Join-Path $ClientPath "session.txt")
+Dump-FileContent "ticket.txt" (Join-Path $ClientPath "ticket.txt")
+Dump-FileContent "main (no extension)" (Join-Path $ClientPath "main")
+
 # === 3. resources/ tree (depth 3) ===
 Write-Section "Arborescence resources/ (profondeur 3)"
 Dump-Tree (Join-Path $ClientPath "resources") 3
@@ -196,7 +202,85 @@ try {
     Write-Line "Erreur: $_"
 }
 
-# === 8. netstat on port 5555 ===
+# === 8a. Crypto / CRYPTS / Shield keyword search in JS source files ===
+Write-Section "Recherche mots-cles CRYPTO/CRYPTS/shield dans les .js (hors node_modules)"
+try {
+    $jsFiles = Get-ChildItem $ClientPath -Recurse -Force -ErrorAction SilentlyContinue `
+        -Include *.js |
+        Where-Object { $_.FullName -notmatch '\\node_modules\\' }
+    $patterns = @(
+        'CRYPTS',
+        'cryptBasic',
+        'parseBasicCrypted',
+        'applyPacketToSendPostProcessing',
+        'shield',
+        'getRandomNetworkKey',
+        'PacketEncryptor',
+        'createCipher',
+        'createDecipher'
+    )
+    $foundAny = $false
+    foreach ($f in $jsFiles) {
+        try {
+            $rel = $f.FullName.Substring($ClientPath.Length)
+            $hits = @()
+            foreach ($p in $patterns) {
+                $m = Select-String -Path $f.FullName -Pattern $p -SimpleMatch -ErrorAction SilentlyContinue
+                if ($m) { $hits += $p }
+            }
+            if ($hits.Count -gt 0) {
+                $foundAny = $true
+                $sizeKb = [math]::Round($f.Length / 1KB, 1)
+                Write-Line ("{0,10} KB  {1}    [matches: {2}]" -f $sizeKb, $rel, ($hits -join ', '))
+            }
+        } catch { }
+    }
+    if (-not $foundAny) {
+        Write-Line "(aucun match - le code est probablement dans un .jsc bytecode)"
+    }
+} catch {
+    Write-Line "Erreur recherche crypto: $_"
+}
+
+# === 8b. List all .jsc files (V8 bytecode where Shield/CRYPTS likely lives) ===
+Write-Section "Fichiers .jsc (bytecode V8 - cibles potentielles pour CRYPTS)"
+try {
+    $jscFiles = Get-ChildItem $ClientPath -Recurse -Filter "*.jsc" -Force -ErrorAction SilentlyContinue
+    if ($jscFiles) {
+        foreach ($f in $jscFiles) {
+            $rel = $f.FullName.Substring($ClientPath.Length)
+            $sizeKb = [math]::Round($f.Length / 1KB, 1)
+            Write-Line ("{0,10} KB  {1}" -f $sizeKb, $rel)
+        }
+    } else {
+        Write-Line "(aucun .jsc trouve)"
+    }
+} catch {
+    Write-Line "Erreur: $_"
+}
+
+# === 8c. List all .js files at app/ root level (hors node_modules), with size ===
+Write-Section "Tous les .js du client (hors node_modules) avec taille"
+try {
+    $jsAll = Get-ChildItem $ClientPath -Recurse -Force -ErrorAction SilentlyContinue -Include *.js |
+        Where-Object { $_.FullName -notmatch '\\node_modules\\' } |
+        Sort-Object Length -Descending
+    foreach ($f in $jsAll) {
+        $rel = $f.FullName.Substring($ClientPath.Length)
+        $sizeKb = [math]::Round($f.Length / 1KB, 1)
+        Write-Line ("{0,10} KB  {1}" -f $sizeKb, $rel)
+    }
+    if (-not $jsAll) {
+        Write-Line "(aucun .js trouve hors node_modules)"
+    }
+} catch {
+    Write-Line "Erreur: $_"
+}
+
+# === 8d. package.json content (entry point, dependencies) ===
+Dump-FileContent "resources/app/package.json" (Join-Path $ClientPath "resources\app\package.json")
+
+# === 8e. netstat on port 5555 ===
 Write-Section "Connexions TCP actuelles sur port 5555"
 $ns = netstat -n | Select-String ":5555"
 if ($ns) {
