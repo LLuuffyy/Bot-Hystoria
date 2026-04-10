@@ -59,9 +59,17 @@ def _resolve_targets(frida_mod, target: str) -> List[int]:
     if target_stripped.isdigit():
         return [int(target_stripped)]
 
+    # In Frida 14+, process enumeration lives on the Device object.
+    # Fall back to the module-level helper for older releases.
+    try:
+        device = frida_mod.get_local_device()
+        procs = device.enumerate_processes()
+    except AttributeError:
+        procs = frida_mod.enumerate_processes()  # type: ignore[attr-defined]
+
     matches: List[int] = []
     wanted = target_stripped.lower()
-    for proc in frida_mod.enumerate_processes():
+    for proc in procs:
         if proc.name.lower() == wanted:
             matches.append(proc.pid)
     return matches
