@@ -83,25 +83,14 @@ TCP    192.168.1.16:61008    162.19.127.155:5555    ESTABLISHED
 Mets l'IP dans `DOFUS_UPSTREAM_HOST` et le port dans
 `DOFUS_UPSTREAM_PORT`.
 
-### 3. Redirection du client Dofus vers le proxy
+### 3. Redirection du client Dofus vers le proxy (hook Frida)
 
-Le client Dofus doit se connecter a `127.0.0.1` au lieu de
-`play-hystoria.net`. La methode la plus simple : modifier le fichier
-`hosts` de Windows.
+Le client Hystoria V5 (Electron + Flash) utilise une IP codee en
+dur dans son bytecode, inaccessible via le fichier `hosts`. On
+utilise [Frida](https://frida.re/) pour intercepter l'appel
+`ws2_32.dll!connect()` et rediriger la connexion vers le proxy.
 
-1. Ouvre le Bloc-notes **en tant qu'administrateur** (clic droit ->
-   Executer en tant qu'administrateur)
-2. Ouvre le fichier : `C:\Windows\System32\drivers\etc\hosts`
-3. Ajoute tout en bas cette ligne :
-
-   ```
-   127.0.0.1    play-hystoria.net
-   ```
-
-4. Sauvegarde et ferme
-
-**Desactive cette ligne (en la prefixant par `#`) quand tu veux jouer
-sans le proxy.**
+**Aucune modification du client Dofus n'est necessaire.**
 
 ### 4. Lancer le proxy
 
@@ -111,17 +100,37 @@ Double-clique sur `run_proxy.bat`. Tu devrais voir :
 ============================================================
 Dofus MITM proxy
   listen   : 127.0.0.1:5555  <-- point your Dofus client here
-  upstream : play-hystoria.net:5555
+  upstream : 162.19.127.155:5555
   script   : (none)
 ============================================================
 Waiting for the Dofus client to connect...
 ```
 
-### 5. Lancer Dofus et te connecter
+### 5. Lancer Dofus (sans se connecter)
 
-Laisse `run_proxy.bat` ouvert et lance ton client Dofus normalement.
-Connecte-toi avec ton compte. Tu devrais voir dans la fenetre du proxy
-des lignes du type :
+Lance `Dofus Retro.exe` normalement. L'ecran de login s'affiche.
+**Ne te connecte pas encore.**
+
+### 6. Lancer le hook Frida
+
+Double-clique sur `run_hook.bat` (ou en PowerShell admin) :
+
+```
+python -m dofus_bot.hook
+```
+
+Tu devrais voir :
+
+```
+Attaching Frida to 'Dofus Retro.exe' ...
+Hook installed.  connect() calls to 162.19.127.155:5555 will be
+redirected to 127.0.0.1:5555.
+```
+
+### 7. Se connecter dans Dofus
+
+**Maintenant** connecte-toi avec ton compte. Tu devrais voir dans la
+fenetre du proxy des lignes du type :
 
 ```
 Client connected from ('127.0.0.1', 54321)
@@ -322,6 +331,11 @@ dofus_bot/
     api.py                # BotAPI : etat + actions exposees a Lua
     engine.py             # LuaEngine : thread worker + hot reload
     sandbox.py            # Retire os/io/require du runtime Lua
+
+  hook/
+    __main__.py           # python -m dofus_bot.hook
+    injector.py           # Frida attach + script loader
+    redirect.js           # Frida JS : hook ws2_32!connect + rewrite sockaddr
 
   data/
     scripts/

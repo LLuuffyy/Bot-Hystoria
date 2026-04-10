@@ -34,7 +34,7 @@ echo [2/3] Activation et mise a jour de pip...
 call .venv\Scripts\activate.bat
 python -m pip install --upgrade pip
 
-echo [3/3] Installation des dependances...
+echo [3/4] Installation des dependances...
 pip install -r requirements.txt
 if errorlevel 1 (
     echo [ERREUR] L'installation des dependances a echoue.
@@ -42,13 +42,23 @@ if errorlevel 1 (
     exit /b 1
 )
 
+echo [4/4] Installation de Frida (hook reseau)...
+pip install frida
+if errorlevel 1 (
+    echo [AVERTISSEMENT] Frida n'a pas pu etre installe.
+    echo                 Le hook reseau ne sera pas disponible.
+    echo                 Le proxy fonctionne quand meme si tu redirige
+    echo                 manuellement le client via hosts file.
+)
+
 echo.
 echo === Installation terminee ! ===
 echo.
 echo Prochaines etapes :
 echo   1. Copie .env.example vers .env et edite-le si besoin
-echo   2. Modifie ton fichier hosts pour rediriger play-hystoria.net
-echo      vers 127.0.0.1 (voir dofus_bot\README.md)
-echo   3. Double-clique sur run_proxy.bat pour lancer le bot
+echo   2. Lance run_proxy.bat (le proxy MITM)
+echo   3. Lance Dofus Retro.exe (sans te connecter)
+echo   4. Lance run_hook.bat (le hook Frida qui redirige Dofus)
+echo   5. Connecte-toi dans Dofus normalement
 echo.
 pause

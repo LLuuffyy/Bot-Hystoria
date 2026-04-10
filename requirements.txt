@@ -5,3 +5,4 @@ playwright-stealth>=2.0.0
 # dofus_bot (socket bot)
 pyyaml>=6.0
 lupa>=2.0
+frida>=16.0

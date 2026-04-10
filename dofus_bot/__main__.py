@@ -89,7 +89,7 @@ def resolve_script_path(script_arg: str) -> Path:
     return inside
 
 
-async def run_proxy(config: DofusConfig) -> None:
+async def run_proxy(config: DofusConfig, hook: bool = False, hook_target: str = "Dofus Retro.exe") -> None:
     state = GameState()
     event_bus = EventBus()
     client_router, server_router = build_routers(state, event_bus)
@@ -102,6 +102,18 @@ async def run_proxy(config: DofusConfig) -> None:
     )
     proxy.on_client_message(client_router.dispatch)
     proxy.on_server_message(server_router.dispatch)
+
+    # Optionally attach Frida to redirect the Dofus client's
+    # connect() calls to land on our proxy.
+    if hook:
+        from .hook.injector import attach_background
+        attach_background(
+            target=hook_target,
+            real_ip=config.upstream_host,
+            real_port=config.upstream_port,
+            proxy_ip=config.proxy_host,
+            proxy_port=config.proxy_port,
+        )
 
     engine: Optional[LuaEngine] = None
     if config.script:
@@ -161,6 +173,21 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Lua script to load (relative to dofus_bot/data/scripts/).",
     )
+    parser.add_argument(
+        "--hook",
+        action="store_true",
+        help=(
+            "Use Frida to hook the running Dofus process and redirect "
+            "its game-server connection to the local proxy. Requires "
+            "'frida' (pip install frida)."
+        ),
+    )
+    parser.add_argument(
+        "--hook-target",
+        type=str,
+        default="Dofus Retro.exe",
+        help="Process name or PID for the Frida hook (default: 'Dofus Retro.exe').",
+    )
     return parser.parse_args()
 
 
@@ -176,7 +203,7 @@ async def main_async() -> None:
         logger.error("No mode selected. Use --proxy.")
         return
 
-    await run_proxy(config)
+    await run_proxy(config, hook=args.hook, hook_target=args.hook_target)
 
 
 def main() -> None:
