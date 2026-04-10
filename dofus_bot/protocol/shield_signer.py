@@ -19,7 +19,7 @@ the companion notes in ``/tmp/dofus-deob/DOCS.md``):
     ct2         = AES-256-CBC(ct1,  key=hash_array[k2], iv=static_iv, PKCS7)
     iv_rand     = os.urandom(16)
     ct3         = AES-256-CBC(ct2,  key=wrap_key,      iv=iv_rand,   PKCS7)
-    output      = raw_packet + "\\xf9" + b64(iv_rand) + "\\xf9" + b64(ct3) + "\\xf9"
+    output      = raw_packet + "\\xf9" + b64(iv_rand) + b64(ct3)
     counter    += 1
 
 The 9 ``hash_array`` keys and the 2 wrap keys are extracted **once**
@@ -32,19 +32,43 @@ the caller's responsibility so we can swap keys at runtime (for tests
 or multi-account setups) and so importing ``dofus_bot.protocol`` never
 blows up just because keys aren't configured yet.
 
-Open questions (to be resolved against captured vectors):
+Output format — confirmed against captures
+-------------------------------------------
+
+We ship with the format that matches the 639 captured Shield API call
+pairs in ``data/security_api_calls.json`` (see
+``https://github.com/xkenzzo31/dofus-retro-deobfuscator``). In those
+captures, ``applyPacketToSendPostProcessing(raw)`` returns a string
+that:
+
+* starts with **exactly one** ``\\xf9`` marker at position 0,
+* is followed by ``base64(iv_rand)`` (24 chars for a 16-byte IV),
+* then ``base64(ct3)`` concatenated directly (no additional marker),
+* has **no trailing marker**, and
+* **does not** re-include the raw input.
+
+The game code then prepends ``raw`` before writing to the socket, so
+the wire layout is:
+
+.. code-block:: text
+
+    raw + b"\\xf9" + b64(iv_rand) + b64(ct3) + b"\\x00"   # \\x00 is the frame terminator
+
+This is what :meth:`ShieldSigner.sign` returns by default. If you need
+the raw signature suffix only (e.g. to reproduce the stock
+``applyPacketToSendPostProcessing`` return value), pass
+``signature_only=True`` — useful when replaying captured vectors.
+
+The previous 2-marker and 3-marker legacy modes from early DOCS.md
+drafts were never observed in real captures and have been removed.
+
+Open questions (still unresolved):
 
 * Which ``k1`` and ``k2`` slots are used (constant? derived from the
   packet prefix? from the counter? from the length?). Default here is
   "constant per connection, set in the keys file", which matches the
   common reverse-engineering pattern — revisit once we can validate
-  against ``data/security_api_calls.json``.
-* Exact output format — DOCS.md documents ``raw + \\xf9 + b64(iv) +
-  \\xf9 + b64(ct) + \\xf9`` (3 markers), captures show ``raw + \\xf9 +
-  b64(iv) + b64(ct) + \\xf9`` (2 markers). We default to the 3-marker
-  format because it matches our strip_shield_signature() parser; a
-  ``SignerConfig.separator_count`` knob lets us flip if captures
-  disagree.
+  against real keys + vectors.
 * Counter initialisation — probably 0 after ``Shield.init()`` but the
   server might expect a non-zero starting value on resume. For now we
   start at 0 and let the caller override via ``SignerConfig.counter``.
@@ -231,15 +255,10 @@ class SignerConfig:
         client side, so we must track those too.
     counter_width:
         Width of the zero-padded counter string. Default 5.
-    separator_count:
-        Number of ``\\xf9`` markers in the output. 3 = the format
-        our stripper assumes (raw | iv_b64 | ct_b64 |), 2 = the format
-        some captures show (raw | iv_b64+ct_b64 |).
     """
 
     counter: int = 0
     counter_width: int = COUNTER_WIDTH
-    separator_count: int = 3
 
 
 class ShieldSigner:
@@ -274,17 +293,32 @@ class ShieldSigner:
     # Public API
     # ------------------------------------------------------------------ #
 
-    def sign(self, raw_packet: bytes) -> bytes:
+    def sign(self, raw_packet: bytes, signature_only: bool = False) -> bytes:
         """Return the Shield-signed form of ``raw_packet``.
+
+        By default returns the wire form ``raw + \\xf9 + b64(iv) +
+        b64(ct)`` ready to be written to the socket (after the
+        ``\\x00`` frame terminator is added by the connection layer).
+
+        Set ``signature_only=True`` to return just the suffix
+        ``\\xf9 + b64(iv) + b64(ct)``, which matches the return value
+        of the stock client's ``applyPacketToSendPostProcessing`` and
+        is what you want when replaying captured vectors from
+        ``data/security_api_calls.json``.
 
         Increments the internal counter on success. On failure (e.g.
         upstream cryptography error) the counter is NOT incremented
         and the exception propagates.
         """
         iv_rand = os.urandom(BLOCK_SIZE)
-        return self._sign_with_iv(raw_packet, iv_rand)
+        return self._sign_with_iv(raw_packet, iv_rand, signature_only)
 
-    def sign_with_iv(self, raw_packet: bytes, iv_rand: bytes) -> bytes:
+    def sign_with_iv(
+        self,
+        raw_packet: bytes,
+        iv_rand: bytes,
+        signature_only: bool = False,
+    ) -> bytes:
         """Deterministic variant of :meth:`sign` for tests/validation.
 
         Useful when replaying a captured signing vector: pass the same
@@ -293,7 +327,7 @@ class ShieldSigner:
         """
         if len(iv_rand) != BLOCK_SIZE:
             raise ValueError(f"iv_rand must be {BLOCK_SIZE} bytes")
-        return self._sign_with_iv(raw_packet, iv_rand)
+        return self._sign_with_iv(raw_packet, iv_rand, signature_only)
 
     def reset_counter(self, value: int = 0) -> None:
         """Reset the counter. Call on every new game-server connection."""
@@ -308,7 +342,12 @@ class ShieldSigner:
     # Internal
     # ------------------------------------------------------------------ #
 
-    def _sign_with_iv(self, raw_packet: bytes, iv_rand: bytes) -> bytes:
+    def _sign_with_iv(
+        self,
+        raw_packet: bytes,
+        iv_rand: bytes,
+        signature_only: bool,
+    ) -> bytes:
         with self._lock:
             counter = self.config.counter
             counter_str = format(counter, f"0{self.config.counter_width}d")
@@ -340,31 +379,18 @@ class ShieldSigner:
                 iv_rand,
             )
 
-            # Output assembly — depends on the marker count observed in
-            # the wild. The default (3 markers) matches our stripper.
+            # Output assembly matches the format observed in real
+            # captures (see module docstring): one marker, then b64(iv)
+            # directly concatenated with b64(ct), no separator in
+            # between and no trailing marker. The raw packet is
+            # prepended by default so the output is ready to frame;
+            # callers replaying the stock client's
+            # applyPacketToSendPostProcessing return value can ask for
+            # the suffix only via signature_only=True.
             iv_b64 = base64.b64encode(iv_rand)
             ct_b64 = base64.b64encode(ct3)
-            if self.config.separator_count == 3:
-                output = (
-                    raw_packet
-                    + SHIELD_MARKER
-                    + iv_b64
-                    + SHIELD_MARKER
-                    + ct_b64
-                    + SHIELD_MARKER
-                )
-            elif self.config.separator_count == 2:
-                output = (
-                    raw_packet
-                    + SHIELD_MARKER
-                    + iv_b64
-                    + ct_b64
-                    + SHIELD_MARKER
-                )
-            else:
-                raise ShieldSignerError(
-                    f"Unsupported separator_count: {self.config.separator_count}"
-                )
+            suffix = SHIELD_MARKER + iv_b64 + ct_b64
+            output = suffix if signature_only else raw_packet + suffix
 
             # Bump counter only after a successful assembly.
             self.config.counter = counter + 1

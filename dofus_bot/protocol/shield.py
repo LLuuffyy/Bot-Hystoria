@@ -4,22 +4,26 @@ The Dofus Retro 1.48 Electron client (which Hystoria V5 embeds to host
 its Flash 1.29 game logic) ships an in-process anti-cheat module called
 **Shield**. Shield is initialised in ``main.jsc`` and is responsible for
 signing every outgoing game packet via a 4-step AES-256-CBC chain. The
-key insight, documented in reverse-engineering notes, is that **Shield
-does not encrypt the packet body** — it only *appends* a signature:
+key insight, documented in reverse-engineering notes and verified
+against the 639 call pairs captured in
+``data/security_api_calls.json`` (see
+``https://github.com/xkenzzo31/dofus-retro-deobfuscator``), is that
+**Shield does not encrypt the packet body** — it only *appends* a
+signature with exactly one ``\\xf9`` marker:
 
 .. code-block:: text
 
-    raw_packet + b"\\xf9" + base64(iv_rand) + base64(ct3) + b"\\xf9"
+    raw_packet + b"\\xf9" + base64(iv_rand) + base64(ct3)
 
-So on the wire, every signed game message that reaches the server (and
-often the reverse) looks like::
+So on the wire, every signed game message that reaches the server
+looks like::
 
-    GDM|1|7411|AbCdEf...ù<base64_iv>ù
+    GDM|1|7411|AbCdEf...ù<base64_iv><base64_ct>
 
 where ``ù`` is ``\\xf9`` rendered in latin-1. The raw Dofus 1.29 text
-prefix (``GDM``, ``GA``, ``GTS``...) sits *before* the first ``\\xf9``
-marker and is perfectly readable — we just need to crop the suffix
-before handing the message to the protocol router.
+prefix (``GDM``, ``GA``, ``GTS``...) sits *before* the one and only
+``\\xf9`` marker and is perfectly readable — we just need to crop the
+suffix before handing the message to the protocol router.
 
 For us, this means two very different problems:
 
@@ -68,8 +72,9 @@ def strip_shield_signature(fragment: bytes) -> Tuple[bytes, Optional[bytes]]:
     * ``payload`` is the shield-stripped bytes ready to be decoded as the
       usual Dofus 1.29 text protocol. When no signature is present it is
       simply the input fragment.
-    * ``signature`` is the full trailing block (including both ``\\xf9``
-      markers) or ``None`` if no signature was found.
+    * ``signature`` is the full trailing block (the lone ``\\xf9``
+      marker plus the base64 IV + ciphertext) or ``None`` if no
+      signature was found.
 
     Examples
     --------
@@ -77,11 +82,11 @@ def strip_shield_signature(fragment: bytes) -> Tuple[bytes, Optional[bytes]]:
     (b'GDM|1|7411', None)
 
     >>> payload, sig = strip_shield_signature(
-    ...     b"GDM|1|7411\\xf9AAECAw==\\xf9BBB==\\xf9"
+    ...     b"GDM|1|7411\\xf9AAECAw==BBBCCC=="
     ... )
     >>> payload
     b'GDM|1|7411'
-    >>> sig.startswith(b"\\xf9") and sig.endswith(b"\\xf9")
+    >>> sig.startswith(b"\\xf9")
     True
     """
     if not fragment:

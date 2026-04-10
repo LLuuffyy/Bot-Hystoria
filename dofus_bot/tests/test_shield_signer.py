@@ -4,11 +4,15 @@ These exercise the signer's math end-to-end against synthetic keys
 (not the real Shield keys — we don't have those in the repo). The
 goal is to pin:
 
-1. The shape of the output (raw || marker || base64 || marker || base64 || marker).
+1. The shape of the output (raw || marker || b64(iv) || b64(ct))
+   which matches the format observed in the 639 captured
+   ``applyPacketToSendPostProcessing`` call pairs.
 2. The counter lockstep (increments by 1 per sign, zero-padded width).
 3. The round-trip with :func:`strip_shield_signature`.
 4. Deterministic replay via :meth:`sign_with_iv`.
 5. Validation of key constraints (32-byte AES-256, 16-byte IV, etc.).
+6. The ``signature_only`` mode that drops the raw prefix so we can
+   compare against the stock client's return value 1:1.
 
 When we get the real keys, we'll add a ``test_real_vectors`` file that
 replays captured calls from ``data/security_api_calls.json`` and
@@ -30,6 +34,9 @@ from dofus_bot.protocol.shield_signer import (
     ShieldSigner,
     SignerConfig,
 )
+
+#: Length of a base64-encoded 16-byte IV (padded): ceil(16/3)*4 = 24.
+_IV_B64_LEN = 24
 
 
 def _make_keys(
@@ -99,7 +106,15 @@ class ShieldKeysValidationTests(unittest.TestCase):
 
 
 class ShieldSignerShapeTests(unittest.TestCase):
-    """The output structure must be parseable by our reader."""
+    """The output structure must match the format seen in real captures.
+
+    Real captures (639 call pairs in
+    ``data/security_api_calls.json``) show exactly one ``\\xf9`` at
+    position 0 of the stock function's return value, followed by
+    b64(iv) then b64(ct) with no separator between them. Our wire
+    form prepends the raw packet so the output is ready to be framed
+    on the socket.
+    """
 
     def setUp(self) -> None:
         self.keys = _make_keys()
@@ -114,12 +129,19 @@ class ShieldSignerShapeTests(unittest.TestCase):
         out = self.signer.sign(b"GA0;1;1234;abcd")
         self.assertIn(SHIELD_MARKER, out)
 
-    def test_output_is_longer_than_raw(self) -> None:
-        raw = b"GC1"
+    def test_output_uses_exactly_one_marker(self) -> None:
+        """Real captures show a single ``\\xf9`` marker, not 2 or 3."""
+        out = self.signer.sign(b"GC1")
+        self.assertEqual(out.count(SHIELD_MARKER), 1)
+
+    def test_marker_sits_immediately_after_raw(self) -> None:
+        raw = b"GA0;1;1234;abcd"
         out = self.signer.sign(raw)
-        # Signature suffix adds >= marker + b64(16) + marker + b64(32) + marker
-        # = 1 + 24 + 1 + 44 + 1 = 71 bytes minimum.
-        self.assertGreater(len(out), len(raw) + 60)
+        self.assertEqual(out[len(raw):len(raw) + 1], SHIELD_MARKER)
+
+    def test_output_does_not_end_with_marker(self) -> None:
+        out = self.signer.sign(b"GC1")
+        self.assertNotEqual(out[-1:], SHIELD_MARKER)
 
     def test_output_roundtrips_through_stripper(self) -> None:
         raw = b"GDM|1|7411|abcdef"
@@ -128,15 +150,23 @@ class ShieldSignerShapeTests(unittest.TestCase):
         self.assertEqual(payload, raw)
         self.assertIsNotNone(sig)
 
-    def test_output_uses_three_markers_by_default(self) -> None:
-        out = self.signer.sign(b"GC1")
-        self.assertEqual(out.count(SHIELD_MARKER), 3)
+    def test_signature_only_mode_drops_raw_prefix(self) -> None:
+        """``signature_only=True`` matches the stock function's return value."""
+        raw = b"GC1"
+        sig = self.signer.sign(raw, signature_only=True)
+        self.assertTrue(sig.startswith(SHIELD_MARKER))
+        self.assertNotIn(raw, sig)
+        # marker + b64(iv) + b64(ct)
+        self.assertEqual(sig.count(SHIELD_MARKER), 1)
 
-    def test_output_uses_two_markers_when_configured(self) -> None:
-        cfg = SignerConfig(separator_count=2)
-        signer = ShieldSigner(self.keys, config=cfg)
-        out = signer.sign(b"GC1")
-        self.assertEqual(out.count(SHIELD_MARKER), 2)
+    def test_signature_only_and_wire_differ_only_by_raw_prefix(self) -> None:
+        raw = b"GDM|1|7411"
+        iv = bytes([0xAB] * BLOCK_SIZE)
+        wire = self.signer.sign_with_iv(raw, iv, signature_only=False)
+        # Reset counter so the second sign uses the same counter value.
+        self.signer.reset_counter(0)
+        sig = self.signer.sign_with_iv(raw, iv, signature_only=True)
+        self.assertEqual(wire, raw + sig)
 
 
 class ShieldSignerCounterTests(unittest.TestCase):
@@ -234,12 +264,27 @@ class ShieldSignerMathTests(unittest.TestCase):
     def test_iv_rand_appears_in_output(self) -> None:
         signer = ShieldSigner(_make_keys())
         iv = bytes([0xDE] * BLOCK_SIZE)
-        out = signer.sign_with_iv(b"GC1", iv)
-        # IV is base64-encoded and sits between the first and second \xf9.
-        parts = out.split(SHIELD_MARKER)
-        # Layout: [raw, b64(iv), b64(ct), b""]
-        self.assertEqual(parts[0], b"GC1")
-        self.assertEqual(base64.b64decode(parts[1]), iv)
+        raw = b"GC1"
+        out = signer.sign_with_iv(raw, iv)
+        # Layout: raw + \xf9 + b64(iv) + b64(ct). Exactly one marker
+        # at position len(raw), and the 24 bytes right after it must
+        # decode to the provided iv.
+        self.assertEqual(out.count(SHIELD_MARKER), 1)
+        marker_idx = out.index(SHIELD_MARKER)
+        self.assertEqual(marker_idx, len(raw))
+        iv_b64 = out[marker_idx + 1 : marker_idx + 1 + _IV_B64_LEN]
+        self.assertEqual(base64.b64decode(iv_b64), iv)
+
+    def test_signature_length_matches_expected_crypto_sizes(self) -> None:
+        """SHA256(32) -> PKCS7 48 -> PKCS7 64 -> PKCS7 80 -> b64 108 chars.
+
+        Together with the 1-byte marker and the 24-char b64(iv), the
+        signature suffix is always 1 + 24 + 108 = 133 bytes.
+        """
+        signer = ShieldSigner(_make_keys())
+        iv = bytes([0x11] * BLOCK_SIZE)
+        sig = signer.sign_with_iv(b"GC1", iv, signature_only=True)
+        self.assertEqual(len(sig), 1 + 24 + 108)
 
 
 if __name__ == "__main__":

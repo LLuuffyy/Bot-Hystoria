@@ -37,10 +37,13 @@ class StripShieldSignatureTests(unittest.TestCase):
         self.assertTrue(sig.startswith(SHIELD_MARKER))
         self.assertTrue(sig.endswith(SHIELD_MARKER))
 
-    def test_signed_fragment_with_nested_base64_markers(self) -> None:
-        # Real Shield signatures carry base64(iv)\xf9 base64(ct)\xf9. The
-        # stripper must split on the FIRST marker so the whole suffix is
-        # peeled off in one shot.
+    def test_signed_fragment_with_multiple_markers_splits_on_first(self) -> None:
+        # Real captures show a single \xf9 marker separating the raw
+        # packet from b64(iv)+b64(ct). But early notes mentioned
+        # variants with internal markers, so we keep the stripper
+        # tolerant: regardless of how many markers show up in a
+        # fragment, splitting on the FIRST one yields the right
+        # payload.
         raw = (
             b"GA0;1;1234;abcdef"
             + SHIELD_MARKER
@@ -61,6 +64,21 @@ class StripShieldSignatureTests(unittest.TestCase):
             + b"AAECAwQFBgcICQoL"
             + SHIELD_MARKER,
         )
+
+    def test_signed_fragment_real_format(self) -> None:
+        # The exact format we see in captures: one marker, then
+        # base64(iv) (24 chars for a 16-byte IV) then base64(ct) (108
+        # chars for the 80-byte AES output), no trailing marker.
+        iv_b64 = b"oxiyNNxGkr2/JWH16aEI2A=="  # 24 chars, real sample
+        ct_b64 = b"A" * 108                    # 108 chars, placeholder
+        raw = b"GC1" + SHIELD_MARKER + iv_b64 + ct_b64
+        payload, sig = strip_shield_signature(raw)
+        self.assertEqual(payload, b"GC1")
+        assert sig is not None
+        # The suffix is exactly 1 + 24 + 108 = 133 bytes, single marker.
+        self.assertEqual(len(sig), 1 + 24 + 108)
+        self.assertEqual(sig.count(SHIELD_MARKER), 1)
+        self.assertTrue(sig.startswith(SHIELD_MARKER))
 
     def test_marker_at_start_gives_empty_payload(self) -> None:
         # Degenerate case we want to handle cleanly: the whole fragment

@@ -301,11 +301,21 @@ Shield **signe** chaque paquet sortant avec une chaine AES-256-CBC en
 paquet, il ajoute juste une signature en suffixe :
 
 ```
-<raw_packet>\xf9<base64_iv>\xf9<base64_ct>\xf9
+<raw_packet>\xf9<base64_iv><base64_ct>
 ```
 
+Un **seul** marqueur `\xf9` separe le paquet lisible de la signature
+binaire. Format confirme contre les 639 paires de captures
+`applyPacketToSendPostProcessing` dans
+`data/security_api_calls.json` (xkenzzo31/dofus-retro-deobfuscator) :
+le marqueur se trouve a la position 0 de la valeur de retour, suivi
+immediatement de 24 caracteres de `b64(iv)` (IV 16 octets) puis de
+108 caracteres de `b64(ct)` (ciphertext 80 octets apres les 4 etapes
+AES + PKCS7). Pas de separateur interne entre `iv` et `ct`, pas de
+marqueur en fin.
+
 Le prefixe Dofus 1.29 habituel (`GDM`, `GA`, `GTS`, ...) reste lisible
-directement avant le premier `\xf9`.
+directement avant le marqueur.
 
 ### Cote lecture (fait)
 
@@ -335,7 +345,7 @@ ct1         = AES-256-CBC(hash, key=hash_array[k1], iv=static_iv)
 ct2         = AES-256-CBC(ct1,  key=hash_array[k2], iv=static_iv)
 iv_rand     = os.urandom(16)
 ct3         = AES-256-CBC(ct2,  key=wrap_key,      iv=iv_rand)
-output      = raw_packet + \xf9 + b64(iv_rand) + \xf9 + b64(ct3) + \xf9
+output      = raw_packet + \xf9 + b64(iv_rand) + b64(ct3)
 ```
 
 Le code est deja la, teste (22 unit tests sur la forme et la
