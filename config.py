@@ -15,6 +15,7 @@ class Config:
     headless: bool
     base_url: str
     cookies_path: Path
+    chrome_profile: str  # Path to Chrome user data dir
 
     @property
     def login_url(self) -> str:
@@ -40,4 +41,5 @@ def load_config() -> Config:
         headless=os.getenv("HEADLESS", "true").lower() == "true",
         base_url=os.getenv("BASE_URL", "https://play-hystoria.net").rstrip("/"),
         cookies_path=Path("state/cookies.json"),
+        chrome_profile=os.getenv("CHROME_PROFILE", ""),
     )

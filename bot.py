@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from pathlib import Path
 
 from playwright.async_api import async_playwright, BrowserContext, Page
@@ -16,8 +17,15 @@ logger = logging.getLogger(__name__)
 MAX_CONSECUTIVE_FAILURES = 5
 FAILURE_COOLDOWN_SECONDS = 1800  # 30 minutes
 
-# Path to store persistent browser profile (survives restarts)
-BROWSER_DATA_DIR = Path("state/browser_profile")
+
+def get_chrome_profile_path() -> str:
+    """Auto-detect Chrome user data directory on Windows."""
+    local_app_data = os.environ.get("LOCALAPPDATA", "")
+    if local_app_data:
+        chrome_path = os.path.join(local_app_data, "Google", "Chrome", "User Data")
+        if os.path.exists(chrome_path):
+            return chrome_path
+    return ""
 
 
 async def ensure_logged_in(page: Page, context: BrowserContext, config: Config) -> bool:
@@ -49,20 +57,28 @@ async def main() -> None:
     # Ensure runtime directories exist
     Path("state").mkdir(exist_ok=True)
     Path("logs").mkdir(exist_ok=True)
-    BROWSER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Determine which Chrome profile to use
+    chrome_profile = config.chrome_profile or get_chrome_profile_path()
+    if chrome_profile:
+        logger.info("Using Chrome profile: %s", chrome_profile)
+    else:
+        chrome_profile = str(Path("state/browser_profile").absolute())
+        Path(chrome_profile).mkdir(parents=True, exist_ok=True)
+        logger.info("Using standalone browser profile: %s", chrome_profile)
 
     consecutive_failures = 0
 
     async with async_playwright() as pw:
-        # Use a persistent browser context with the real Chrome browser
-        # This looks like a real user's Chrome, not an automated browser
+        # Use the user's real Chrome profile to bypass Cloudflare
+        # IMPORTANT: Chrome must be fully closed before running the bot!
         context = await pw.chromium.launch_persistent_context(
-            user_data_dir=str(BROWSER_DATA_DIR),
-            channel="chrome",  # Use the real Chrome installed on the PC
+            user_data_dir=chrome_profile,
+            channel="chrome",
             headless=config.headless,
             slow_mo=100,
             viewport={"width": 1280, "height": 720},
-            ignore_default_args=["--enable-automation"],  # Remove the automation banner
+            ignore_default_args=["--enable-automation"],
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--disable-infobars",
