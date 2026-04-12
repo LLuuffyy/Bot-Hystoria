@@ -62,8 +62,10 @@ async def main() -> None:
             headless=config.headless,
             slow_mo=100,
             viewport={"width": 1280, "height": 720},
+            ignore_default_args=["--enable-automation"],  # Remove the automation banner
             args=[
                 "--disable-blink-features=AutomationControlled",
+                "--disable-infobars",
                 "--no-first-run",
                 "--no-default-browser-check",
             ],
