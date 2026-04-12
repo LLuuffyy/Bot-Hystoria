@@ -1,21 +1,20 @@
 import os
 import sys
 from dataclasses import dataclass
-from pathlib import Path
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
 
 @dataclass(frozen=True)
 class Config:
     username: str
     password: str
     vote_interval: int  # minutes
-    headless: bool
     base_url: str
-    cookies_path: Path
-    chrome_profile: str  # Path to Chrome user data dir
+    cf_clearance: str
+    phpsessid: str
 
     @property
     def login_url(self) -> str:
@@ -24,6 +23,10 @@ class Config:
     @property
     def vote_url(self) -> str:
         return f"{self.base_url}/vote"
+
+    @property
+    def vote_api_url(self) -> str:
+        return f"{self.base_url}/api/vote"
 
 
 def load_config() -> Config:
@@ -34,12 +37,19 @@ def load_config() -> Config:
         print("ERREUR: HYSTORIA_USERNAME et HYSTORIA_PASSWORD doivent être définis dans .env")
         sys.exit(1)
 
+    cf_clearance = os.getenv("CF_CLEARANCE", "")
+    phpsessid = os.getenv("PHPSESSID", "")
+
+    if not cf_clearance or not phpsessid:
+        print("ERREUR: CF_CLEARANCE et PHPSESSID doivent être définis dans .env")
+        print("Exporte-les depuis Chrome DevTools (F12 > Application > Cookies)")
+        sys.exit(1)
+
     return Config(
         username=username,
         password=password,
         vote_interval=int(os.getenv("VOTE_INTERVAL_MINUTES", "90")),
-        headless=os.getenv("HEADLESS", "true").lower() == "true",
         base_url=os.getenv("BASE_URL", "https://play-hystoria.net").rstrip("/"),
-        cookies_path=Path("state/cookies.json"),
-        chrome_profile=os.getenv("CHROME_PROFILE", ""),
+        cf_clearance=cf_clearance,
+        phpsessid=phpsessid,
     )

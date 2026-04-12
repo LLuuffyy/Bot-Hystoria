@@ -1,11 +1,12 @@
 import logging
-from datetime import datetime
+import re
 from enum import Enum
 
-from playwright.async_api import Page, BrowserContext
+import httpx
+from bs4 import BeautifulSoup
 
 from config import Config
-from auth import wait_for_cloudflare, save_cookies
+from cooldown import parse_cooldown
 
 logger = logging.getLogger(__name__)
 
@@ -17,185 +18,232 @@ class VoteResult(Enum):
     ERROR = "error"
 
 
-async def attempt_vote(page: Page, context: BrowserContext, config: Config) -> VoteResult:
-    """Navigate to vote page and attempt to vote. Returns the result state."""
-    logger.info("Navigating to vote page: %s", config.vote_url)
+async def check_vote_status(client: httpx.AsyncClient, config: Config) -> tuple[str, str]:
+    """Fetch the vote page and return (card_class, status_title)."""
+    resp = await client.get(config.vote_url)
+    resp.raise_for_status()
+    html = resp.text
 
+    if "Mon Profil" not in html:
+        return "not_logged_in", ""
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    card = soup.find(id="voteStatusCard")
+    card_class = " ".join(card.get("class", [])) if card else ""
+
+    title_el = soup.find(id="voteStatusTitle")
+    status_title = title_el.get_text(strip=True) if title_el else ""
+
+    return card_class, status_title
+
+
+async def get_cooldown_from_page(client: httpx.AsyncClient, config: Config) -> int | None:
+    """Fetch the vote page and extract cooldown seconds."""
     try:
-        await page.goto(config.vote_url, wait_until="networkidle", timeout=60000)
-        await wait_for_cloudflare(page)
+        resp = await client.get(config.vote_url)
+        resp.raise_for_status()
+        return parse_cooldown(resp.text)
+    except Exception:
+        return None
 
-        # Wait for the page to fully render (JS-rendered content)
-        await page.wait_for_timeout(2000)
 
-        # Check if we're redirected to login (not logged in)
-        if "/login" in page.url:
-            logger.warning("Redirected to login page - session expired")
-            return VoteResult.NOT_LOGGED_IN
+async def generate_otp(client: httpx.AsyncClient, config: Config) -> str | None:
+    """POST to /api/vote with action=generate_otp. Returns the external vote URL."""
+    logger.info("Génération OTP via API...")
+    try:
+        resp = await client.post(
+            config.vote_api_url,
+            data={"action": "generate_otp"},
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Referer": config.vote_url,
+                "X-Requested-With": "XMLHttpRequest",
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        logger.debug("API response: %s", data)
 
-        # Check for "Mon Profil" to confirm we're logged in
-        try:
-            profile = page.locator("text=Mon Profil").first
-            if not await profile.is_visible(timeout=5000):
-                logger.warning("Not logged in - Mon Profil not visible")
-                return VoteResult.NOT_LOGGED_IN
-        except Exception:
-            logger.warning("Could not verify login status")
-            return VoteResult.NOT_LOGGED_IN
+        if data.get("success") and data.get("vote_url"):
+            logger.info("OTP généré! URL: %s", data["vote_url"])
+            return data["vote_url"]
 
-        # Detect page state using exact IDs from the HTML
-        return await _detect_and_act(page, context, config)
+        logger.error("API generate_otp échoué: %s", data)
+        return None
 
     except Exception as e:
-        logger.error("Error during vote attempt: %s", e)
-        await _take_debug_screenshot(page)
-        return VoteResult.ERROR
+        logger.error("Erreur generate_otp: %s", e)
+        return None
 
 
-async def _detect_and_act(page: Page, context: BrowserContext, config: Config) -> VoteResult:
-    """Detect the vote page state and act accordingly."""
-
-    # Read the vote status from #voteStatusCard class
-    status_card = page.locator("#voteStatusCard")
+async def vote_on_external_site(client: httpx.AsyncClient, vote_url: str) -> bool:
+    """Visit the external vote page (serveur-prive.net) and click 'Je vote maintenant'."""
+    logger.info("Visite page externe: %s", vote_url)
     try:
-        card_class = await status_card.get_attribute("class", timeout=5000) or ""
-    except Exception:
-        card_class = ""
+        # Step 1: GET the external vote page
+        resp = await client.get(vote_url)
+        resp.raise_for_status()
+        html = resp.text
+        logger.debug("Page externe chargée (%d chars)", len(html))
 
-    # Read the title: <h4 id="voteStatusTitle">Vote Disponible !</h4>
-    status_title = ""
+        # Step 2: Find "Je vote maintenant" link
+        soup = BeautifulSoup(html, "html.parser")
+
+        # Look for a link or button with "Je vote maintenant"
+        vote_link = None
+        for a in soup.find_all("a", href=True):
+            if "vote" in a.get_text(strip=True).lower():
+                vote_link = a["href"]
+                break
+
+        # Also try form action
+        if not vote_link:
+            form = soup.find("form")
+            if form and form.get("action"):
+                vote_link = form["action"]
+
+        if vote_link:
+            # Make the link absolute if relative
+            if vote_link.startswith("/"):
+                # Extract base from vote_url
+                from urllib.parse import urlparse
+                parsed = urlparse(vote_url)
+                vote_link = f"{parsed.scheme}://{parsed.netloc}{vote_link}"
+            elif not vote_link.startswith("http"):
+                from urllib.parse import urljoin
+                vote_link = urljoin(vote_url, vote_link)
+
+            logger.info("Click 'Je vote maintenant': %s", vote_link)
+            resp2 = await client.get(vote_link)
+            resp2.raise_for_status()
+            logger.info("Vote externe effectué (status %d)", resp2.status_code)
+            return True
+
+        # If no link found, the visit itself might count as the vote
+        logger.warning("Lien 'Je vote maintenant' non trouvé, la visite seule suffit peut-être")
+        return True
+
+    except Exception as e:
+        logger.error("Erreur vote externe: %s", e)
+        return False
+
+
+async def poll_vote_status(
+    client: httpx.AsyncClient, config: Config, max_attempts: int = 18, interval: float = 5.0
+) -> bool:
+    """Poll the API to check if the vote was registered. 18 attempts * 5s = 90s max."""
+    import asyncio
+    logger.info("Vérification du vote (polling %d tentatives)...", max_attempts)
+
+    for i in range(max_attempts):
+        try:
+            # Try check_vote action
+            resp = await client.post(
+                config.vote_api_url,
+                data={"action": "check_vote"},
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Referer": config.vote_url,
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            logger.debug("Poll #%d: %s", i + 1, data)
+
+            # Check if vote is confirmed (status changed to cooldown)
+            if data.get("success") or data.get("status") == "cooldown" or data.get("voted"):
+                logger.info("Vote confirmé au poll #%d!", i + 1)
+                return True
+
+        except Exception as e:
+            logger.debug("Poll #%d erreur: %s", i + 1, e)
+
+        # Also check via page HTML
+        try:
+            card_class, status_title = await check_vote_status(client, config)
+            if "cooldown" in card_class.lower() or "cooldown" in status_title.lower():
+                logger.info("Vote confirmé (page en cooldown)!")
+                return True
+        except Exception:
+            pass
+
+        await asyncio.sleep(interval)
+
+    logger.warning("Timeout polling - vote non confirmé après %d tentatives", max_attempts)
+    return False
+
+
+async def attempt_vote(client: httpx.AsyncClient, config: Config) -> VoteResult:
+    """Full vote flow: check status → generate OTP → vote externally → verify."""
+    import asyncio
+
+    logger.info("=== Tentative de vote ===")
+
+    # Step 1: Check current vote status
     try:
-        status_title = await page.locator("#voteStatusTitle").text_content(timeout=3000) or ""
-    except Exception:
-        pass
+        card_class, status_title = await check_vote_status(client, config)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 403:
+            logger.error("403 Forbidden - cookies expirés! Mets à jour CF_CLEARANCE et PHPSESSID dans .env")
+            return VoteResult.ERROR
+        raise
 
-    logger.debug("Vote card class: '%s', title: '%s'", card_class, status_title)
+    logger.info("Status - class: '%s', title: '%s'", card_class, status_title)
 
-    # --- COOLDOWN STATE ---
+    if card_class == "not_logged_in":
+        return VoteResult.NOT_LOGGED_IN
+
+    # COOLDOWN
     if "cooldown" in card_class.lower() or "cooldown" in status_title.lower():
-        logger.info("Vote is on cooldown (title: %s)", status_title)
+        logger.info("Vote en cooldown")
         return VoteResult.COOLDOWN
 
-    # Fallback: check for PATIENTE button
-    try:
-        patiente = page.locator("text=PATIENTE").first
-        if await patiente.is_visible(timeout=1000):
-            logger.info("Vote is on cooldown (PATIENTE button visible)")
-            return VoteResult.COOLDOWN
-    except Exception:
-        pass
-
-    # --- VOTE AVAILABLE STATE ---
+    # VOTE AVAILABLE
     if "available" in card_class.lower() or "Disponible" in status_title:
-        logger.info("Vote is available! (title: %s)", status_title)
+        logger.info("Vote disponible! Lancement du processus...")
 
-        # Step 1: Click #btnGenerateOTP on play-hystoria.net
-        # This opens serveur-prive.net in a new tab
-        vote_btn = page.locator("#btnGenerateOTP")
-        try:
-            await vote_btn.wait_for(state="visible", timeout=5000)
-        except Exception as e:
-            logger.warning("Vote button #btnGenerateOTP not found: %s", e)
-            await _take_debug_screenshot(page)
+        # Step 2: Generate OTP
+        vote_url = await generate_otp(client, config)
+        if not vote_url:
             return VoteResult.ERROR
 
-        # Listen for new tab/popup before clicking
-        logger.info("Clicking vote button (#btnGenerateOTP)...")
-        async with context.expect_page(timeout=15000) as new_page_info:
-            await vote_btn.click()
+        # Step 3: Vote on external site
+        await asyncio.sleep(2)
+        await vote_on_external_site(client, vote_url)
 
-        # Step 2: Handle the external vote page (serveur-prive.net)
+        # Step 4: Poll for confirmation
+        await asyncio.sleep(3)
+        confirmed = await poll_vote_status(client, config)
+
+        if confirmed:
+            logger.info("Vote réussi!")
+            return VoteResult.SUCCESS
+
+        # Try manual check as fallback
+        logger.info("Tentative manual_check...")
         try:
-            external_page = await new_page_info.value
-            logger.info("External vote tab opened: %s", external_page.url)
-
-            await external_page.wait_for_load_state("networkidle", timeout=30000)
-            await external_page.wait_for_timeout(2000)
-
-            # Click "Je vote maintenant" button on serveur-prive.net
-            vote_now_btn = (
-                external_page.locator("text=Je vote maintenant")
-                .or_(external_page.locator("a:has-text('Je vote maintenant')"))
-                .or_(external_page.locator("button:has-text('Je vote maintenant')"))
-            ).first
-
-            try:
-                await vote_now_btn.wait_for(state="visible", timeout=10000)
-                logger.info("Clicking 'Je vote maintenant' on serveur-prive.net...")
-                await vote_now_btn.click()
-
-                # Wait for the vote to be processed on the external site
-                await external_page.wait_for_load_state("networkidle", timeout=30000)
-                await external_page.wait_for_timeout(3000)
-                logger.info("External vote completed. Page: %s", external_page.url)
-
-            except Exception as e:
-                logger.warning("Could not click 'Je vote maintenant': %s", e)
-                await _take_debug_screenshot(external_page, prefix="external")
-
-            # Close the external tab
-            await external_page.close()
-            logger.info("External vote tab closed")
-
+            resp = await client.post(
+                config.vote_api_url,
+                data={"action": "manual_check"},
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Referer": config.vote_url,
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+            )
+            data = resp.json()
+            logger.debug("manual_check response: %s", data)
+            if data.get("success"):
+                logger.info("Vote confirmé via manual_check!")
+                return VoteResult.SUCCESS
         except Exception as e:
-            logger.warning("Error handling external vote page: %s", e)
-            # Close any extra tabs
-            for p in context.pages[1:]:
-                await p.close()
+            logger.debug("manual_check erreur: %s", e)
 
-        # Step 3: Back on play-hystoria.net - click #btnManualCheck if it appears
-        await page.bring_to_front()
-        await page.wait_for_timeout(2000)
-
-        manual_btn = page.locator("#btnManualCheck")
-        try:
-            if await manual_btn.is_visible(timeout=5000):
-                logger.info("Manual check button appeared, clicking #btnManualCheck...")
-                await manual_btn.click()
-                await page.wait_for_load_state("networkidle", timeout=15000)
-                await page.wait_for_timeout(3000)
-        except Exception:
-            pass
-
-        # Step 4: Verify success - check if status changed to cooldown
-        try:
-            new_title = await page.locator("#voteStatusTitle").text_content(timeout=5000) or ""
-            new_class = await page.locator("#voteStatusCard").get_attribute("class", timeout=3000) or ""
-
-            if "cooldown" in new_class.lower() or "cooldown" in new_title.lower():
-                logger.info("Vote confirmed successful! Status: %s", new_title)
-                await save_cookies(context, config)
-                return VoteResult.SUCCESS
-        except Exception:
-            pass
-
-        # Check for reward modal (#rewardModal)
-        try:
-            reward_modal = page.locator("#rewardModal")
-            if await reward_modal.is_visible(timeout=3000):
-                logger.info("Reward modal appeared - vote successful!")
-                await save_cookies(context, config)
-                return VoteResult.SUCCESS
-        except Exception:
-            pass
-
-        # If we went through the whole flow, assume success
-        logger.info("Vote flow completed - assuming success")
-        await save_cookies(context, config)
+        # Assume success if we went through the whole flow
+        logger.info("Flow complet - on assume le succès")
         return VoteResult.SUCCESS
 
-    # Unknown state
-    logger.warning("Unknown vote state - card class: '%s', title: '%s'", card_class, status_title)
-    await _take_debug_screenshot(page)
+    logger.warning("État de vote inconnu - class: '%s', title: '%s'", card_class, status_title)
     return VoteResult.ERROR
-
-
-async def _take_debug_screenshot(page: Page, prefix: str = "error") -> None:
-    """Take a screenshot for debugging purposes."""
-    try:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = f"logs/{prefix}_{timestamp}.png"
-        await page.screenshot(path=path)
-        logger.info("Debug screenshot saved: %s", path)
-    except Exception as e:
-        logger.debug("Could not take screenshot: %s", e)

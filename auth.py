@@ -1,118 +1,79 @@
 import logging
 
-from playwright.async_api import Page, BrowserContext
+import httpx
 
 from config import Config
 
 logger = logging.getLogger(__name__)
 
 
-async def wait_for_cloudflare(page: Page, timeout: int = 45000) -> None:
-    """Wait for Cloudflare challenge to complete, clicking Turnstile if needed."""
+def build_client(config: Config) -> httpx.AsyncClient:
+    """Build an httpx client with the user's cookies and realistic headers."""
+    cookies = httpx.Cookies()
+    cookies.set("cf_clearance", config.cf_clearance, domain="play-hystoria.net")
+    cookies.set("PHPSESSID", config.phpsessid, domain="play-hystoria.net")
+
+    return httpx.AsyncClient(
+        cookies=cookies,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Referer": config.base_url + "/",
+        },
+        follow_redirects=True,
+        timeout=30.0,
+    )
+
+
+async def check_session(client: httpx.AsyncClient, config: Config) -> bool:
+    """Check if the current session is valid by looking for 'Mon Profil'."""
     try:
-        # Check if we're on a Cloudflare challenge page
-        if "challenge" in page.url or "cdn-cgi" in page.url:
-            logger.info("Cloudflare challenge detected, waiting...")
-
-        # Try to click the Turnstile checkbox if present
-        for _ in range(3):
-            try:
-                # Turnstile checkbox is inside an iframe
-                cf_iframe = page.frame_locator("iframe[src*='challenges.cloudflare.com']")
-                checkbox = cf_iframe.locator("input[type='checkbox']").or_(
-                    cf_iframe.locator(".cb-lb")
-                ).or_(
-                    cf_iframe.locator("#challenge-stage")
-                )
-                if await checkbox.first.is_visible(timeout=3000):
-                    logger.info("Clicking Cloudflare Turnstile checkbox...")
-                    await checkbox.first.click()
-                    await page.wait_for_timeout(5000)
-            except Exception:
-                break
-
-        # Wait for the challenge to resolve (page navigates away from challenge)
-        await page.wait_for_function(
-            """() => {
-                return !document.querySelector('#challenge-running')
-                    && !document.querySelector('#challenge-form')
-                    && !document.querySelector('.cf-browser-verification')
-                    && !document.title.includes('instant');
-            }""",
-            timeout=timeout,
-        )
-        logger.debug("Cloudflare challenge resolved")
-
-    except Exception:
-        pass  # No challenge present or already resolved
-
-
-async def is_logged_in(page: Page) -> bool:
-    """Check if the user is currently logged in."""
-    try:
-        profile_link = page.locator("text=Mon Profil").first
-        return await profile_link.is_visible(timeout=3000)
-    except Exception:
+        resp = await client.get(config.base_url)
+        resp.raise_for_status()
+        if "Mon Profil" in resp.text:
+            logger.info("Session valide (Mon Profil trouvé)")
+            return True
+        logger.warning("Session invalide (Mon Profil absent)")
+        return False
+    except httpx.HTTPStatusError as e:
+        logger.error("Erreur HTTP session check: %s", e.response.status_code)
+        return False
+    except Exception as e:
+        logger.error("Erreur session check: %s", e)
         return False
 
 
-async def login(page: Page, context: BrowserContext, config: Config) -> bool:
-    """Log in to play-hystoria.net. Returns True on success."""
-    logger.info("Navigating to login page: %s", config.login_url)
-    await page.goto(config.login_url, wait_until="networkidle", timeout=60000)
-    await wait_for_cloudflare(page)
-
-    # Check if already logged in
-    if await is_logged_in(page):
-        logger.info("Already logged in!")
-        await save_cookies(context, config)
-        return True
-
-    logger.info("Logging in as %s...", config.username)
-
+async def do_login(client: httpx.AsyncClient, config: Config) -> bool:
+    """Attempt to log in via HTTP POST."""
+    logger.info("Tentative de login HTTP pour %s...", config.username)
     try:
-        # Fill login form
-        username_field = (
-            page.locator('input[name="username"]')
-            .or_(page.locator('input[name="email"]'))
-            .or_(page.locator('input[type="email"]'))
-            .or_(page.locator('input[name="login"]'))
-            .or_(page.get_by_placeholder("Nom d'utilisateur"))
-            .or_(page.get_by_placeholder("Email"))
-        ).first
-        await username_field.fill(config.username, timeout=10000)
+        # POST login form
+        resp = await client.post(
+            config.login_url,
+            data={
+                "username": config.username,
+                "password": config.password,
+            },
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Referer": config.login_url,
+            },
+        )
+        resp.raise_for_status()
 
-        password_field = page.locator('input[type="password"]').first
-        await password_field.fill(config.password, timeout=10000)
-
-        submit_btn = (
-            page.locator('button[type="submit"]')
-            .or_(page.get_by_role("button", name="Connexion"))
-            .or_(page.get_by_role("button", name="Se connecter"))
-            .or_(page.locator("button:has-text('Connexion')"))
-        ).first
-        await submit_btn.click(timeout=10000)
-
-        # Wait for navigation after login
-        await page.wait_for_load_state("networkidle", timeout=30000)
-        await wait_for_cloudflare(page)
-
-        # Verify login success
-        if await is_logged_in(page):
-            logger.info("Login successful!")
-            await save_cookies(context, config)
+        if "Mon Profil" in resp.text:
+            logger.info("Login réussi!")
             return True
 
-        logger.error("Login failed - 'Mon Profil' not found after submission")
+        logger.error("Login échoué - 'Mon Profil' absent après soumission")
         return False
 
     except Exception as e:
-        logger.error("Login error: %s", e)
+        logger.error("Erreur login: %s", e)
         return False
-
-
-async def save_cookies(context: BrowserContext, config: Config) -> None:
-    """Save browser cookies/session to disk."""
-    config.cookies_path.parent.mkdir(parents=True, exist_ok=True)
-    await context.storage_state(path=str(config.cookies_path))
-    logger.debug("Cookies saved to %s", config.cookies_path)
