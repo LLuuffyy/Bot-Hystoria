@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Hystoria Auto-Voter
 // @namespace    https://github.com/LLuuffyy/Bot-Hystoria
-// @version      1.3.0
+// @version      1.4.0
 // @description  Vote automatiquement sur play-hystoria.net toutes les 1h30 pour gagner +50 ogrines
 // @author       Zeliox83
 // @match        https://play-hystoria.net/*
@@ -244,6 +244,10 @@
                 setTimeout(() => location.reload(), RETRY_DELAY_MS);
                 return;
             }
+
+            // Scroll vers le bouton au cas où le site ferait du lazy-loading
+            voteBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            await sleep(800);
 
             voteBtn.click();
             setStatus('Clic effectué. Ouverture de l\'onglet externe...');
