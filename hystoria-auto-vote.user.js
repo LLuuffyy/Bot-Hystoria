@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Hystoria Auto-Voter
 // @namespace    https://github.com/LLuuffyy/Bot-Hystoria
-// @version      1.4.0
+// @version      1.5.0
 // @description  Vote automatiquement sur play-hystoria.net toutes les 1h30 pour gagner +50 ogrines
 // @author       Zeliox83
 // @match        https://play-hystoria.net/*
@@ -18,6 +18,7 @@
     // --- CREDENTIALS (modifiables) ---
     const HYSTORIA_USERNAME = 'Zeliox83';
     const HYSTORIA_PASSWORD = 'Boston83';
+    const SERVEUR_PRIVE_PSEUDO = 'Zeliox'; // pseudo affiché sur serveur-prive.net
 
     // --- CONFIG ---
     const VOTE_INTERVAL_MS = 90 * 60 * 1000;       // 1h30 par défaut si on ne peut pas lire le cooldown
@@ -164,6 +165,21 @@
     async function handleExternalVote() {
         setStatus('Sur serveur-prive.net - attente de la page...');
         await sleep(EXTERNAL_CLICK_DELAY_MS);
+
+        // Remplir le pseudo si le champ est vide
+        const inputs = document.querySelectorAll('input[type="text"], input:not([type])');
+        for (const input of inputs) {
+            // On cherche un champ texte visible et vide (pas un champ caché ou readonly)
+            if (input.offsetParent === null || input.readOnly || input.disabled) continue;
+            if (!input.value || input.value.trim() === '') {
+                setStatus(`Champ pseudo vide, remplissage avec "${SERVEUR_PRIVE_PSEUDO}"...`);
+                input.value = SERVEUR_PRIVE_PSEUDO;
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+                await sleep(500);
+                break;
+            }
+        }
 
         // Chercher le bouton/lien "Je vote maintenant"
         const candidates = document.querySelectorAll('a, button, input[type="submit"]');
