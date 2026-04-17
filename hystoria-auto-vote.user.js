@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         Hystoria Auto-Voter
 // @namespace    https://github.com/LLuuffyy/Bot-Hystoria
-// @version      1.0.0
+// @version      1.1.0
 // @description  Vote automatiquement sur play-hystoria.net toutes les 1h30 pour gagner +50 ogrines
 // @author       Zeliox83
 // @match        https://play-hystoria.net/vote*
 // @match        https://play-hystoria.net/vote/*
+// @match        https://play-hystoria.net/login*
 // @match        https://www.serveur-prive.net/*
 // @match        https://serveur-prive.net/*
 // @grant        GM_setValue
@@ -16,12 +17,17 @@
 (function() {
     'use strict';
 
+    // --- CREDENTIALS (modifiables) ---
+    const HYSTORIA_USERNAME = 'Zeliox83';
+    const HYSTORIA_PASSWORD = 'Boston83';
+
     // --- CONFIG ---
     const VOTE_INTERVAL_MS = 90 * 60 * 1000;       // 1h30 par défaut si on ne peut pas lire le cooldown
     const RETRY_DELAY_MS = 60 * 1000;              // 1 min en cas d'erreur
     const POST_VOTE_BUFFER_MS = 30 * 1000;         // +30s après la fin du cooldown pour être tranquille
     const EXTERNAL_CLICK_DELAY_MS = 3000;          // attente avant de cliquer "Je vote maintenant"
     const EXTERNAL_CLOSE_DELAY_MS = 5000;          // attente après vote externe avant fermeture
+    const LOGIN_REDIRECT_DELAY_MS = 5000;          // attente après login avant retour /vote
 
     // --- LOG HELPERS ---
     const LOG_PREFIX = '[Hystoria-Bot]';
@@ -90,6 +96,72 @@
         return null;
     }
 
+    function isOnLoginPage() {
+        if (location.pathname.includes('/login')) return true;
+        // Détection alternative: présence d'un champ password sans Mon Profil
+        const hasPassword = document.querySelector('input[type="password"]');
+        const hasProfile = (document.body.textContent || '').includes('Mon Profil');
+        return hasPassword && !hasProfile;
+    }
+
+    // --- PAGE login ---
+    async function handleLoginPage() {
+        setStatus('Page de login détectée. Tentative de reconnexion auto...');
+        await sleep(1500);
+
+        const userField = document.querySelector('input[name="username"]')
+            || document.querySelector('input[name="email"]')
+            || document.querySelector('input[type="email"]')
+            || document.querySelector('input[name="login"]');
+
+        const passField = document.querySelector('input[type="password"]');
+
+        if (!userField || !passField) {
+            setStatus('Champs login non trouvés.<br>Reconnecte-toi manuellement.');
+            return;
+        }
+
+        userField.value = HYSTORIA_USERNAME;
+        userField.dispatchEvent(new Event('input', { bubbles: true }));
+        userField.dispatchEvent(new Event('change', { bubbles: true }));
+
+        passField.value = HYSTORIA_PASSWORD;
+        passField.dispatchEvent(new Event('input', { bubbles: true }));
+        passField.dispatchEvent(new Event('change', { bubbles: true }));
+
+        await sleep(500);
+
+        // Trouver le bouton submit
+        let submitBtn = document.querySelector('button[type="submit"]')
+            || document.querySelector('input[type="submit"]');
+        if (!submitBtn) {
+            const buttons = document.querySelectorAll('button, a');
+            for (const b of buttons) {
+                const txt = (b.textContent || '').trim().toLowerCase();
+                if (txt.includes('connexion') || txt.includes('se connecter') || txt === 'login') {
+                    submitBtn = b;
+                    break;
+                }
+            }
+        }
+
+        if (!submitBtn) {
+            setStatus('Bouton submit non trouvé.<br>Reconnecte-toi manuellement.');
+            return;
+        }
+
+        setStatus('Identifiants saisis. Clic sur Connexion...');
+        submitBtn.click();
+
+        // Après login, on attend puis on redirige vers /vote
+        await sleep(LOGIN_REDIRECT_DELAY_MS);
+        setStatus('Login effectué. Redirection vers /vote...');
+        await sleep(2000);
+        if (!location.pathname.includes('/vote')) {
+            location.href = 'https://play-hystoria.net/vote';
+        }
+    }
+
     // --- PAGE externe serveur-prive.net ---
     async function handleExternalVote() {
         setStatus('Sur serveur-prive.net - attente de la page...');
@@ -124,8 +196,20 @@
     async function handleHystoriaVote() {
         setStatus('Chargement de la page de vote...');
 
+        // Vérifier d'abord si on a été redirigé sur /login
+        await sleep(2000);
+        if (isOnLoginPage()) {
+            await handleLoginPage();
+            return;
+        }
+
         const statusCard = await waitFor('#voteStatusCard', 20000);
         if (!statusCard) {
+            // Re-vérifier login au cas où
+            if (isOnLoginPage()) {
+                await handleLoginPage();
+                return;
+            }
             setStatus('Page de vote non détectée. Reload dans 1 min.');
             setTimeout(() => location.reload(), RETRY_DELAY_MS);
             return;
@@ -217,7 +301,11 @@
             if (host.includes('serveur-prive.net')) {
                 await handleExternalVote();
             } else if (host.includes('play-hystoria.net')) {
-                await handleHystoriaVote();
+                if (location.pathname.includes('/login')) {
+                    await handleLoginPage();
+                } else {
+                    await handleHystoriaVote();
+                }
             }
         } catch (e) {
             err('Erreur:', e);
