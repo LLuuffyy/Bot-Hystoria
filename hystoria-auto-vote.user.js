@@ -1,9 +1,11 @@
 // ==UserScript==
 // @name         Hystoria Auto-Voter
 // @namespace    https://github.com/LLuuffyy/Bot-Hystoria
-// @version      1.1.0
+// @version      1.2.0
 // @description  Vote automatiquement sur play-hystoria.net toutes les 1h30 pour gagner +50 ogrines
 // @author       Zeliox83
+// @match        https://play-hystoria.net/
+// @match        https://play-hystoria.net/index*
 // @match        https://play-hystoria.net/vote*
 // @match        https://play-hystoria.net/vote/*
 // @match        https://play-hystoria.net/login*
@@ -301,10 +303,16 @@
             if (host.includes('serveur-prive.net')) {
                 await handleExternalVote();
             } else if (host.includes('play-hystoria.net')) {
-                if (location.pathname.includes('/login')) {
+                const path = location.pathname;
+                if (path.includes('/login')) {
                     await handleLoginPage();
-                } else {
+                } else if (path.includes('/vote')) {
                     await handleHystoriaVote();
+                } else {
+                    // Page d'accueil ou /index : on redirige vers /vote
+                    setStatus('Page d\'accueil détectée. Redirection vers /vote...');
+                    await sleep(1500);
+                    location.href = 'https://play-hystoria.net/vote';
                 }
             }
         } catch (e) {
