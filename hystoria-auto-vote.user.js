@@ -397,35 +397,10 @@
     // AUTRES PAGES play-hystoria.net
     // ========================================
     function handleOtherPage() {
-        const nextVoteAt = GM_getValue('next_vote_at', 0);
-        const voteInProgress = GM_getValue('vote_in_progress', 0);
-        const now = Date.now();
-
-        // Si un vote est en cours, rediriger vers /vote
-        if (voteInProgress > 0 && (now - voteInProgress) < VOTE_IN_PROGRESS_TTL) {
-            setStatus('Vote en cours! Redirection vers /vote...');
-            setTimeout(() => {
-                location.href = 'https://play-hystoria.net/vote';
-            }, 2000);
-            return;
-        }
-
-        // Si c'est l'heure de voter (dans la minute qui vient)
-        if (nextVoteAt > 0 && now >= nextVoteAt - 60000) {
-            setStatus('C\'est l\'heure de voter! Redirection...');
-            setTimeout(() => {
-                location.href = 'https://play-hystoria.net/vote';
-            }, 2000);
-            return;
-        }
-
-        // Sinon, afficher le statut sans rediriger
-        if (nextVoteAt > 0 && nextVoteAt > now) {
-            const remaining = Math.round((nextVoteAt - now) / 60000);
-            setStatus(`Prochain vote dans ~${remaining} min.<br><a href="/vote" style="color:#4ecdc4;text-decoration:underline">Aller à /vote</a>`);
-        } else {
-            setStatus(`Bot actif.<br><a href="/vote" style="color:#4ecdc4;text-decoration:underline">Aller à /vote</a>`);
-        }
+        setStatus(`Page "${location.pathname}" détectée. Redirection vers /vote...`);
+        setTimeout(() => {
+            location.href = 'https://play-hystoria.net/vote';
+        }, 2000);
     }
 
     // ========================================
