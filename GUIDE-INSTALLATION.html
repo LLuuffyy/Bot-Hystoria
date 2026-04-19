@@ -1,0 +1,628 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>Hystoria Auto-Voter — Guide d'installation</title>
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+        font-family: 'Segoe UI', 'Helvetica Neue', sans-serif;
+        background: #0a0a1a;
+        color: #e4e4e4;
+        overflow: hidden;
+        height: 100vh;
+    }
+
+    .slides-container {
+        position: relative;
+        width: 100vw;
+        height: 100vh;
+    }
+
+    .slide {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        padding: 60px 80px;
+        display: none;
+        flex-direction: column;
+        justify-content: center;
+        background: linear-gradient(135deg, #0a0a1a 0%, #16213e 50%, #1a1a2e 100%);
+        overflow-y: auto;
+        animation: fadeIn 0.4s ease-out;
+    }
+
+    .slide.active { display: flex; }
+
+    @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(15px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+
+    .slide-number {
+        position: absolute;
+        top: 30px;
+        right: 40px;
+        color: #e94560;
+        font-family: monospace;
+        font-size: 14px;
+        opacity: 0.7;
+    }
+
+    .slide-tag {
+        display: inline-block;
+        color: #4ecdc4;
+        font-family: monospace;
+        font-size: 14px;
+        letter-spacing: 2px;
+        text-transform: uppercase;
+        margin-bottom: 16px;
+    }
+
+    h1 {
+        font-size: 56px;
+        color: #e94560;
+        margin-bottom: 24px;
+        line-height: 1.1;
+    }
+
+    h2 {
+        font-size: 38px;
+        color: #e94560;
+        margin-bottom: 20px;
+        line-height: 1.2;
+    }
+
+    h3 {
+        font-size: 22px;
+        color: #4ecdc4;
+        margin: 20px 0 12px 0;
+    }
+
+    p, li {
+        font-size: 18px;
+        line-height: 1.7;
+        color: #d0d0d0;
+    }
+
+    .subtitle {
+        font-size: 22px;
+        color: #bbbbbb;
+        margin-bottom: 30px;
+        max-width: 900px;
+    }
+
+    ul, ol {
+        margin-left: 24px;
+        margin-bottom: 20px;
+    }
+
+    li { margin-bottom: 8px; }
+
+    code, .inline-code {
+        background: #16213e;
+        color: #4ecdc4;
+        padding: 3px 8px;
+        border-radius: 4px;
+        font-family: 'Consolas', monospace;
+        font-size: 0.9em;
+        border: 1px solid rgba(78, 205, 196, 0.2);
+    }
+
+    .code-block {
+        background: #0f0f1f;
+        border-left: 4px solid #4ecdc4;
+        padding: 16px 20px;
+        margin: 16px 0;
+        border-radius: 4px;
+        font-family: 'Consolas', monospace;
+        font-size: 15px;
+        overflow-x: auto;
+        color: #e4e4e4;
+    }
+
+    .code-block .hl { color: #e94560; font-weight: bold; }
+    .code-block .comment { color: #6b7280; font-style: italic; }
+
+    .card {
+        background: rgba(22, 33, 62, 0.6);
+        border: 2px solid rgba(233, 69, 96, 0.3);
+        border-radius: 12px;
+        padding: 24px 32px;
+        margin: 16px 0;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    }
+
+    .card.accent { border-color: #4ecdc4; }
+    .card.warning { border-color: #ffd166; background: rgba(255, 209, 102, 0.08); }
+
+    .step {
+        display: flex;
+        align-items: flex-start;
+        gap: 20px;
+        margin: 20px 0;
+    }
+
+    .step-num {
+        background: linear-gradient(135deg, #e94560, #c13050);
+        color: white;
+        width: 44px;
+        height: 44px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: bold;
+        font-size: 20px;
+        flex-shrink: 0;
+        box-shadow: 0 3px 10px rgba(233, 69, 96, 0.4);
+    }
+
+    .step-content { flex: 1; padding-top: 8px; }
+    .step-content p { font-size: 17px; }
+
+    .nav {
+        position: fixed;
+        bottom: 20px;
+        left: 0;
+        right: 0;
+        display: flex;
+        justify-content: center;
+        gap: 12px;
+        z-index: 1000;
+    }
+
+    .nav button {
+        background: linear-gradient(135deg, #e94560, #c13050);
+        color: white;
+        border: none;
+        padding: 10px 28px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 15px;
+        font-weight: bold;
+        transition: all 0.2s;
+        box-shadow: 0 2px 8px rgba(233, 69, 96, 0.3);
+    }
+
+    .nav button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(233, 69, 96, 0.5);
+    }
+
+    .nav button:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+        transform: none;
+    }
+
+    .progress {
+        position: fixed;
+        top: 0;
+        left: 0;
+        height: 4px;
+        background: linear-gradient(90deg, #e94560, #4ecdc4);
+        transition: width 0.3s;
+        z-index: 1001;
+    }
+
+    .badge-demo {
+        display: inline-block;
+        background: linear-gradient(135deg, #1a1a2e, #16213e);
+        color: #e94560;
+        padding: 12px 16px;
+        border: 2px solid #e94560;
+        border-radius: 8px;
+        font-family: monospace;
+        font-size: 13px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+        margin-top: 12px;
+    }
+
+    .link {
+        color: #4ecdc4;
+        text-decoration: none;
+        border-bottom: 1px dashed #4ecdc4;
+    }
+
+    .grid-2 {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 30px;
+        margin-top: 20px;
+    }
+
+    .hero-emoji {
+        font-size: 100px;
+        margin-bottom: 20px;
+    }
+
+    .keyhint {
+        position: fixed;
+        bottom: 20px;
+        right: 30px;
+        color: #6b7280;
+        font-size: 12px;
+        font-family: monospace;
+    }
+
+    .feature-list {
+        list-style: none;
+        margin-left: 0;
+    }
+
+    .feature-list li {
+        padding: 10px 0;
+        padding-left: 32px;
+        position: relative;
+    }
+
+    .feature-list li::before {
+        content: "✓";
+        position: absolute;
+        left: 0;
+        color: #4ecdc4;
+        font-weight: bold;
+        font-size: 20px;
+    }
+
+    .warning-icon { color: #ffd166; font-weight: bold; }
+    .success-icon { color: #4ecdc4; font-weight: bold; }
+</style>
+</head>
+<body>
+
+<div class="progress" id="progress"></div>
+
+<div class="slides-container">
+
+    <!-- SLIDE 1 : COUVERTURE -->
+    <div class="slide active">
+        <div class="slide-number">01 / 10</div>
+        <div style="text-align: center;">
+            <div class="hero-emoji">🗳️</div>
+            <h1 style="font-size: 72px;">Hystoria Auto-Voter</h1>
+            <p class="subtitle" style="margin: 30px auto; font-size: 26px;">
+                Le bot qui vote tout seul pour toi sur <strong>play-hystoria.net</strong><br>
+                et qui te fait gagner <strong style="color: #ffd166;">+50 ogrines toutes les 1h30</strong>
+            </p>
+            <div class="card accent" style="max-width: 700px; margin: 20px auto;">
+                <p style="font-size: 20px; text-align: center;">
+                    <strong style="color: #4ecdc4;">Guide d'installation</strong><br>
+                    <span style="color: #888; font-size: 16px;">Simple • Rapide • 5 minutes chrono</span>
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <!-- SLIDE 2 : CE QUE FAIT LE BOT -->
+    <div class="slide">
+        <div class="slide-number">02 / 10</div>
+        <div class="slide-tag">── Présentation</div>
+        <h2>Ce que le bot fait pour toi</h2>
+        <p class="subtitle">Tu n'as rien à faire. Laisse Chrome ouvert sur play-hystoria.net, il gère tout.</p>
+
+        <ul class="feature-list">
+            <li><strong>Se connecte tout seul</strong> si ta session expire</li>
+            <li><strong>Vote toutes les 1h30</strong> automatiquement</li>
+            <li><strong>Ouvre serveur-prive.net</strong> et clique sur "Je vote maintenant"</li>
+            <li><strong>Lit le timer de cooldown</strong> et attend le bon moment</li>
+            <li><strong>Synchronise les deux onglets</strong> entre eux</li>
+            <li><strong>Affiche un badge</strong> en bas à droite avec le statut</li>
+        </ul>
+    </div>
+
+    <!-- SLIDE 3 : PRÉREQUIS -->
+    <div class="slide">
+        <div class="slide-number">03 / 10</div>
+        <div class="slide-tag">── Étape 1</div>
+        <h2>Installer Tampermonkey</h2>
+        <p class="subtitle">Tampermonkey est l'extension Chrome qui permet d'exécuter le bot.</p>
+
+        <div class="step">
+            <div class="step-num">1</div>
+            <div class="step-content">
+                <h3>Ouvre Google Chrome</h3>
+                <p>(Ça marche aussi sur Edge, Brave, Firefox, etc.)</p>
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="step-num">2</div>
+            <div class="step-content">
+                <h3>Va sur le Chrome Web Store</h3>
+                <p>Cherche <code>Tampermonkey</code> et clique sur "Ajouter à Chrome"</p>
+                <p style="margin-top: 8px;">
+                    <a class="link" href="https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo" target="_blank">
+                        → chromewebstore.google.com/...
+                    </a>
+                </p>
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="step-num">3</div>
+            <div class="step-content">
+                <h3>Confirme l'installation</h3>
+                <p>L'icône de Tampermonkey apparaît en haut à droite de Chrome.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- SLIDE 4 : DEVELOPER MODE -->
+    <div class="slide">
+        <div class="slide-number">04 / 10</div>
+        <div class="slide-tag">── Étape 2</div>
+        <h2>Activer le mode développeur</h2>
+        <p class="subtitle"><span class="warning-icon">⚠</span> C'est obligatoire sinon Tampermonkey ne pourra pas lancer le script.</p>
+
+        <div class="step">
+            <div class="step-num">1</div>
+            <div class="step-content">
+                <p>Dans Chrome, va à l'URL : <code>chrome://extensions/</code></p>
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="step-num">2</div>
+            <div class="step-content">
+                <p>En haut à droite, active le toggle <strong style="color: #4ecdc4;">"Mode développeur"</strong></p>
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="step-num">3</div>
+            <div class="step-content">
+                <p><strong style="color: #ffd166;">Redémarre Chrome complètement</strong> (ferme toutes les fenêtres puis rouvre)</p>
+            </div>
+        </div>
+
+        <div class="card warning">
+            <p><span class="warning-icon">⚠</span> <strong>Sans redémarrage de Chrome</strong>, le mode développeur ne prend pas effet et le bot ne fonctionnera pas.</p>
+        </div>
+    </div>
+
+    <!-- SLIDE 5 : CRÉER LE SCRIPT -->
+    <div class="slide">
+        <div class="slide-number">05 / 10</div>
+        <div class="slide-tag">── Étape 3</div>
+        <h2>Créer un nouveau script</h2>
+        <p class="subtitle">On va copier le script du bot dans Tampermonkey.</p>
+
+        <div class="step">
+            <div class="step-num">1</div>
+            <div class="step-content">
+                <p>Clique sur l'icône <strong>Tampermonkey</strong> en haut à droite de Chrome</p>
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="step-num">2</div>
+            <div class="step-content">
+                <p>Dans le menu, clique sur <strong style="color: #4ecdc4;">"Créer un nouveau script..."</strong></p>
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="step-num">3</div>
+            <div class="step-content">
+                <p>Un éditeur s'ouvre. <strong>Sélectionne tout</strong> (Ctrl+A) et <strong>supprime</strong> le contenu par défaut.</p>
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="step-num">4</div>
+            <div class="step-content">
+                <p>Colle le script complet qu'on t'a envoyé (<code>hystoria-auto-vote.user.js</code>)</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- SLIDE 6 : CREDENTIALS -->
+    <div class="slide">
+        <div class="slide-number">06 / 10</div>
+        <div class="slide-tag">── Étape 4 • IMPORTANT</div>
+        <h2>Renseigner tes identifiants</h2>
+        <p class="subtitle">C'est la seule partie à modifier dans le script. Tout en haut, tu verras :</p>
+
+        <div class="code-block">
+<span class="comment">// --- CREDENTIALS ---</span>
+const HYSTORIA_USERNAME = <span class="hl">'NOM-DE-COMPTE'</span>;
+const HYSTORIA_PASSWORD = <span class="hl">'MOT-DE-PASSE'</span>;
+const SERVEUR_PRIVE_PSEUDO = <span class="hl">'Tomos'</span>;
+        </div>
+
+        <h3 style="margin-top: 24px;">Remplace les 3 valeurs par :</h3>
+        <ul>
+            <li><code>HYSTORIA_USERNAME</code> → ton <strong>nom d'utilisateur</strong> sur play-hystoria.net</li>
+            <li><code>HYSTORIA_PASSWORD</code> → ton <strong>mot de passe</strong> play-hystoria.net</li>
+            <li><code>SERVEUR_PRIVE_PSEUDO</code> → ton <strong>pseudo</strong> en jeu (celui de ton perso Dofus)</li>
+        </ul>
+
+        <div class="card warning">
+            <p><span class="warning-icon">⚠</span> Garde bien les <strong>guillemets simples</strong> <code>'...'</code> autour de chaque valeur.</p>
+        </div>
+    </div>
+
+    <!-- SLIDE 7 : EXEMPLE -->
+    <div class="slide">
+        <div class="slide-number">07 / 10</div>
+        <div class="slide-tag">── Exemple concret</div>
+        <h2>Comment ça doit ressembler</h2>
+        <p class="subtitle">Si par exemple ton compte est <code>Bobby99</code> avec le mdp <code>secret123</code> et ton perso s'appelle <code>Bob-Le-Destrier</code>:</p>
+
+        <div class="code-block">
+<span class="comment">// --- CREDENTIALS ---</span>
+const HYSTORIA_USERNAME = <span class="hl">'Bobby99'</span>;
+const HYSTORIA_PASSWORD = <span class="hl">'secret123'</span>;
+const SERVEUR_PRIVE_PSEUDO = <span class="hl">'Bob-Le-Destrier'</span>;
+        </div>
+
+        <div class="grid-2">
+            <div class="card accent">
+                <h3 style="color: #4ecdc4; margin-top: 0;">✓ Correct</h3>
+                <div class="code-block" style="font-size: 13px; margin: 0;">
+const HYSTORIA_USERNAME = <span class="hl">'Bobby99'</span>;
+                </div>
+            </div>
+            <div class="card" style="border-color: #e94560;">
+                <h3 style="color: #e94560; margin-top: 0;">✗ Incorrect</h3>
+                <div class="code-block" style="font-size: 13px; margin: 0;">
+const HYSTORIA_USERNAME = <span class="hl">Bobby99</span>;
+                </div>
+                <p style="font-size: 14px; color: #888; margin-top: 8px;">(guillemets manquants)</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- SLIDE 8 : SAUVEGARDER -->
+    <div class="slide">
+        <div class="slide-number">08 / 10</div>
+        <div class="slide-tag">── Étape 5</div>
+        <h2>Sauvegarder & activer le script</h2>
+
+        <div class="step">
+            <div class="step-num">1</div>
+            <div class="step-content">
+                <h3>Sauvegarder</h3>
+                <p>Appuie sur <code>Ctrl + S</code> (ou menu <strong>Fichier → Sauver</strong>)</p>
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="step-num">2</div>
+            <div class="step-content">
+                <h3>Vérifier que c'est activé</h3>
+                <p>Dans le tableau de bord Tampermonkey, ton script doit apparaître avec le toggle <strong style="color: #4ecdc4;">vert (activé)</strong></p>
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="step-num">3</div>
+            <div class="step-content">
+                <h3>Fermer l'éditeur</h3>
+                <p>Tu peux fermer l'onglet, le script tourne en arrière-plan dès qu'une page correspondante est ouverte.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- SLIDE 9 : VÉRIFIER -->
+    <div class="slide">
+        <div class="slide-number">09 / 10</div>
+        <div class="slide-tag">── Étape 6</div>
+        <h2>Vérifier que ça marche</h2>
+
+        <div class="step">
+            <div class="step-num">1</div>
+            <div class="step-content">
+                <p>Ouvre un nouvel onglet et va sur : <code>https://play-hystoria.net</code></p>
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="step-num">2</div>
+            <div class="step-content">
+                <p>Un <strong>badge rouge apparaît en bas à droite</strong> :</p>
+                <div class="badge-demo">
+                    <b>Hystoria Auto-Voter</b><br>
+                    <span style="color: #e4e4e4;">Redirection vers /vote...</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="step-num">3</div>
+            <div class="step-content">
+                <p>Tu seras redirigé automatiquement vers la page de vote.</p>
+                <p>→ Si vote dispo : le bot vote tout seul</p>
+                <p>→ Si cooldown : le bot affiche le temps restant et attend</p>
+            </div>
+        </div>
+
+        <div class="card accent">
+            <p><span class="success-icon">✓</span> <strong>C'est tout !</strong> Tu peux juste laisser Chrome ouvert sur play-hystoria.net et le bot votera tout seul toutes les 1h30.</p>
+        </div>
+    </div>
+
+    <!-- SLIDE 10 : DÉPANNAGE -->
+    <div class="slide">
+        <div class="slide-number">10 / 10</div>
+        <div class="slide-tag">── Besoin d'aide ?</div>
+        <h2>Dépannage rapide</h2>
+
+        <div class="card">
+            <h3 style="margin-top: 0;">❌ Le badge n'apparaît pas</h3>
+            <ul>
+                <li>Vérifie que le mode développeur est activé dans <code>chrome://extensions/</code></li>
+                <li>Redémarre Chrome complètement</li>
+                <li>Vérifie que le script Tampermonkey est bien activé (toggle vert)</li>
+            </ul>
+        </div>
+
+        <div class="card">
+            <h3 style="margin-top: 0;">❌ "Champs login non trouvés"</h3>
+            <ul>
+                <li>Connecte-toi manuellement une fois sur play-hystoria.net</li>
+                <li>Vérifie que username/password sont bien entre guillemets dans le script</li>
+            </ul>
+        </div>
+
+        <div class="card">
+            <h3 style="margin-top: 0;">❌ L'onglet serveur-prive.net ne se ferme pas</h3>
+            <ul>
+                <li>C'est normal, Chrome empêche parfois la fermeture auto</li>
+                <li>Le vote est quand même pris en compte, tu peux fermer l'onglet à la main</li>
+            </ul>
+        </div>
+
+        <div style="text-align: center; margin-top: 30px;">
+            <p style="font-size: 20px; color: #4ecdc4;"><strong>Bon farm d'ogrines ! 🎉</strong></p>
+        </div>
+    </div>
+
+</div>
+
+<div class="nav">
+    <button id="prev" onclick="changeSlide(-1)">← Précédent</button>
+    <button id="next" onclick="changeSlide(1)">Suivant →</button>
+</div>
+
+<div class="keyhint">← → pour naviguer</div>
+
+<script>
+    let currentSlide = 0;
+    const slides = document.querySelectorAll('.slide');
+    const total = slides.length;
+    const progressBar = document.getElementById('progress');
+    const prevBtn = document.getElementById('prev');
+    const nextBtn = document.getElementById('next');
+
+    function showSlide(n) {
+        slides.forEach(s => s.classList.remove('active'));
+        slides[n].classList.add('active');
+        progressBar.style.width = ((n + 1) / total * 100) + '%';
+        prevBtn.disabled = (n === 0);
+        nextBtn.disabled = (n === total - 1);
+    }
+
+    function changeSlide(dir) {
+        const newIndex = currentSlide + dir;
+        if (newIndex >= 0 && newIndex < total) {
+            currentSlide = newIndex;
+            showSlide(currentSlide);
+        }
+    }
+
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowRight' || e.key === ' ') changeSlide(1);
+        if (e.key === 'ArrowLeft') changeSlide(-1);
+    });
+
+    showSlide(0);
+</script>
+
+</body>
+</html>
